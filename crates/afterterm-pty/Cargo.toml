@@ -1,0 +1,11 @@
+[package]
+name = "afterterm-pty"
+version = "0.1.0"
+edition = "2021"
+description = "Multi-session PTY and production command gate for AfterTerm"
+license = "MIT"
+publish = false
+
+[dependencies]
+portable-pty = "0.9.0"
+serde = { version = "1", features = ["derive"] }
