@@ -3,7 +3,7 @@ use base64::{engine::general_purpose::STANDARD, Engine};
 use serde::{Deserialize, Serialize};
 use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io::{Read, Write},
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -63,12 +63,33 @@ impl Config {
             .timeout(Duration::from_millis(100)))
     }
 }
+const BOOT_BUFFER_LIMIT: usize = 256 * 1024;
+#[derive(Default)]
+struct BootBuffer {
+    attached: bool,
+    chunks: VecDeque<Vec<u8>>,
+    bytes: usize,
+    dropped: usize,
+}
+impl BootBuffer {
+    fn push(&mut self, bytes: &[u8]) {
+        self.chunks.push_back(bytes.to_vec());
+        self.bytes += bytes.len();
+        while self.bytes > BOOT_BUFFER_LIMIT {
+            if let Some(chunk) = self.chunks.pop_front() {
+                self.bytes -= chunk.len();
+                self.dropped += chunk.len();
+            }
+        }
+    }
+}
 struct Session {
     port: Box<dyn SerialPort>,
     stop: Arc<AtomicBool>,
     reader: Option<std::thread::JoinHandle<()>>,
     config: Config,
     pending: Option<Vec<u8>>,
+    output: Arc<Mutex<BootBuffer>>,
     transferring: Arc<AtomicBool>,
     cancel_transfer: Arc<AtomicBool>,
 }
@@ -167,7 +188,7 @@ pub fn serial_ports() -> Result<Vec<Port>, String> {
     Ok(ports)
 }
 #[tauri::command]
-pub fn serial_open(state: State<Consoles>, config: Config) -> Result<u64, String> {
+pub fn serial_open(app: AppHandle, state: State<Consoles>, config: Config) -> Result<u64, String> {
     let builder = config.builder()?;
     let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
     if sessions.values().any(|s| s.config.path == config.path) {
@@ -185,10 +206,15 @@ pub fn serial_open(state: State<Consoles>, config: Config) -> Result<u64, String
             reader: None,
             config,
             pending: None,
+            output: Arc::new(Mutex::new(BootBuffer::default())),
             transferring: Arc::new(AtomicBool::new(false)),
             cancel_transfer: Arc::new(AtomicBool::new(false)),
         },
     );
+    if let Err(error) = start_reader(app, sessions.get_mut(&id).ok_or("Console is closed")?, id) {
+        sessions.remove(&id);
+        return Err(error);
+    }
     Ok(id)
 }
 #[derive(Clone, Serialize)]
@@ -201,33 +227,80 @@ struct Exit {
     id: u64,
     code: u32,
 }
-// Attach only after the renderer has subscribed so initial console output is retained.
+// The reader starts at open and buffers output until listeners are attached.
 #[tauri::command]
 pub fn serial_attach(app: AppHandle, state: State<Consoles>, id: u64) -> Result<(), String> {
-    let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
-    let session = sessions.get_mut(&id).ok_or("Console is closed")?;
+    let sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
+    let session = sessions.get(&id).ok_or("Console is closed")?;
+    let mut output = session
+        .output
+        .lock()
+        .map_err(|_| "Console output unavailable")?;
+    if output.attached {
+        return Ok(());
+    }
+    if output.dropped > 0 {
+        app.emit(
+            "serial:output",
+            Output {
+                id,
+                data: STANDARD.encode(format!(
+                    "\r\n[{} bytes of early console output dropped]\r\n",
+                    output.dropped
+                )),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    while let Some(chunk) = output.chunks.front() {
+        app.emit(
+            "serial:output",
+            Output {
+                id,
+                data: STANDARD.encode(chunk),
+            },
+        )
+        .map_err(|e| e.to_string())?;
+        output.chunks.pop_front();
+    }
+    output.bytes = 0;
+    output.attached = true;
+    if session.stop.load(Ordering::SeqCst) {
+        let _ = app.emit("serial:exit", Exit { id, code: 1 });
+    }
+    Ok(())
+}
+fn start_reader(app: AppHandle, session: &mut Session, id: u64) -> Result<(), String> {
     if session.reader.is_some() {
         return Ok(());
     }
     let mut port = session.port.try_clone().map_err(|e| e.to_string())?;
     let stop = session.stop.clone();
+    let output = session.output.clone();
     session.reader = Some(std::thread::spawn(move || {
         let mut buf = [0u8; 8192];
         while !stop.load(Ordering::SeqCst) {
             match port.read(&mut buf) {
                 Ok(0) => break,
                 Ok(n) => {
-                    if app
-                        .emit(
-                            "serial:output",
-                            Output {
-                                id,
-                                data: STANDARD.encode(&buf[..n]),
-                            },
-                        )
-                        .is_err()
-                    {
+                    let Ok(mut buffer) = output.lock() else {
                         break;
+                    };
+                    if buffer.attached {
+                        if app
+                            .emit(
+                                "serial:output",
+                                Output {
+                                    id,
+                                    data: STANDARD.encode(&buf[..n]),
+                                },
+                            )
+                            .is_err()
+                        {
+                            break;
+                        }
+                    } else {
+                        buffer.push(&buf[..n]);
                     }
                 }
                 Err(e)
@@ -276,7 +349,7 @@ pub async fn serial_control(
     value: bool,
     duration: u64,
 ) -> Result<(), String> {
-    let mut port = {
+    let (mut port, busy, stop) = {
         let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
         let session = sessions.get_mut(&id).ok_or("Console is closed")?;
         if session.stop.load(Ordering::SeqCst)
@@ -288,9 +361,15 @@ pub async fn serial_control(
         if action == "rts" && session.config.flow_control == "hardware" {
             return Err("RTS is controlled by hardware flow control".into());
         }
-        session.port.try_clone().map_err(|e| e.to_string())?
+        let port = session.port.try_clone().map_err(|e| e.to_string())?;
+        session.transferring.store(true, Ordering::SeqCst);
+        (port, session.transferring.clone(), session.stop.clone())
     };
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        let _guard = TransferGuard(busy);
+        if stop.load(Ordering::SeqCst) {
+            return Err("Console disconnected".into());
+        }
         match action.as_str() {
             "break" => {
                 if !(50..=2000).contains(&duration) {
@@ -456,6 +535,21 @@ pub fn serial_close(state: State<Consoles>, id: u64) -> Result<(), String> {
 mod tests {
     use super::*;
     #[test]
+    fn early_output_buffer_is_ordered_and_bounded() {
+        let mut buffer = BootBuffer::default();
+        buffer.push(b"boot\r\n");
+        buffer.push(b"login:");
+        assert_eq!(
+            buffer.chunks.iter().flatten().copied().collect::<Vec<_>>(),
+            b"boot\r\nlogin:"
+        );
+        for _ in 0..40 {
+            buffer.push(&[1; 8192]);
+        }
+        assert!(buffer.bytes <= BOOT_BUFFER_LIMIT);
+        assert!(buffer.dropped > 0);
+    }
+    #[test]
     fn paced_paste_cancels_without_sending_remaining_newline() {
         let mut output = Vec::new();
         let sent = std::cell::Cell::new(0);
@@ -492,6 +586,7 @@ mod tests {
             reader: None,
             config,
             pending: None,
+            output: Arc::new(Mutex::new(BootBuffer::default())),
             transferring: Arc::new(AtomicBool::new(false)),
             cancel_transfer: Arc::new(AtomicBool::new(false)),
         };
