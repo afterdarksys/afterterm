@@ -2,13 +2,13 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./native.ts";
 
-import { DEFAULT_CONSOLE, type ConsoleConfig } from "./console.ts";
+import { DEFAULT_CONSOLE, type ConsoleConfig, type ConsolePort } from "./console.ts";
 export type { ConsoleConfig } from "./console.ts";
 export function ConsolePanel({ onConnect, onClose }: {
   onConnect: (config: ConsoleConfig) => Promise<void>; onClose: () => void;
 }) {
   const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE);
-  const [ports, setPorts] = useState<{ path: string; label: string }[]>([]);
+  const [ports, setPorts] = useState<ConsolePort[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const refresh = async () => {
@@ -22,7 +22,7 @@ export function ConsolePanel({ onConnect, onClose }: {
     <p className="prefs-note">Direct USB / serial access to switches, routers, servers, and appliances.</p>
     <form className="console-form" onSubmit={async (event) => {
       event.preventDefault(); setBusy(true); setError("");
-      try { await onConnect(config); onClose(); } catch (e) { setError(String(e)); } finally { setBusy(false); }
+      try { await onConnect({ ...config, identity: ports.find((p) => p.path === config.path)?.identity ?? undefined }); onClose(); } catch (e) { setError(String(e)); } finally { setBusy(false); }
     }}>
       <label>Detected devices<select value={ports.some((p) => p.path === config.path) ? config.path : ""} onChange={(e) => setConfig({ ...config, path: e.target.value })}>
         <option value="" disabled>Select a device or enter its path</option>
@@ -37,6 +37,7 @@ export function ConsolePanel({ onConnect, onClose }: {
       <label>Flow control<select value={config.flow_control} onChange={(e) => setConfig({ ...config, flow_control: e.target.value })}>{["none", "hardware", "software"].map((v) => <option key={v}>{v}</option>)}</select></label>
       <label>Enter / pasted line endings<select value={config.lineEnding} onChange={(e) => setConfig({ ...config, lineEnding: e.target.value as ConsoleConfig["lineEnding"] })}><option value="cr">CR</option><option value="lf">LF</option><option value="crlf">CRLF</option></select></label>
       <label>Backspace sends<select value={config.backspace} onChange={(e) => setConfig({ ...config, backspace: e.target.value as ConsoleConfig["backspace"] })}><option value="del">DEL (127)</option><option value="bs">BS (8)</option></select></label>
+      <label className="check"><input type="checkbox" checked={config.autoReconnect ?? false} disabled={!ports.find((p) => p.path === config.path)?.identity} onChange={(e) => setConfig({ ...config, autoReconnect: e.target.checked })} />Reconnect when this USB adapter returns</label>
       <label className="check"><input type="checkbox" checked={config.localEcho} onChange={(e) => setConfig({ ...config, localEcho: e.target.checked })} />Local echo (also displays typed passwords)</label>
       <label className="check"><input type="checkbox" checked={config.production} onChange={(e) => setConfig({ ...config, production: e.target.checked })} />Production console: review every Enter</label>
       <p className="prefs-note">Starts at 9600 / 8N1, no flow control. Match the device’s console settings and cable. Received bytes render directly.</p>

@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-export function ConsoleTools({ id, disabled, onStatus }: { id: number; disabled: boolean; onStatus: (message: string) => void }) {
+export function ConsoleTools({ id, disabled, onStatus, onReconnect }: { onReconnect: () => void; id: number; disabled: boolean; onStatus: (message: string) => void }) {
   const [duration, setDuration] = useState(250);
   const [busy, setBusy] = useState(false);
   const control = async (action: string, value = false) => {
@@ -11,6 +11,7 @@ export function ConsoleTools({ id, disabled, onStatus }: { id: number; disabled:
   return <details className="console-tools">
     <summary>Console controls</summary>
     <div>
+      <button disabled={!disabled || busy} onClick={onReconnect}>Reconnect</button>
       <label>BREAK duration (ms)<input type="number" min={50} max={2000} value={duration} onChange={(e) => setDuration(Number(e.target.value))} /></label>
       <button disabled={disabled || busy} onClick={() => void control("break")}>Send BREAK</button>
       <button disabled={disabled || busy} onClick={() => void control("interrupt")}>Send Ctrl+C</button>

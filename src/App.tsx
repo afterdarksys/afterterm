@@ -7,6 +7,7 @@ import { FindBar } from "./FindBar.tsx";
 import { matchAction } from "./keybindings.ts";
 import { isTauri } from "./native.ts";
 import { DEFAULT_PREFS, fromWire, toWire, type Prefs } from "./prefs.ts";
+import { reconnectPath, type ConsolePort } from "./console.ts";
 import { ConsolePaste } from "./ConsolePaste.tsx";
 import { ConsoleTools } from "./ConsoleTools.tsx";
 import { ConsolePanel, type ConsoleConfig } from "./ConsolePanel.tsx";
@@ -143,6 +144,35 @@ export default function App() {
     setStatus("Console connected");
   };
 
+  const reconnecting = useRef(new Set<string>());
+  const reconnectConsole = async (tab: Tab, automatic = false) => {
+    if (!tab.consoleConfig || reconnecting.current.has(tab.key)) return;
+    reconnecting.current.add(tab.key);
+    try {
+      const ports = await invoke<ConsolePort[]>("serial_ports");
+      const path = reconnectPath({ ...tab.consoleConfig, autoReconnect: automatic }, ports);
+      if (tab.sessionId != null) await invoke("serial_close", { id: tab.sessionId });
+      const config = { ...tab.consoleConfig, path };
+      const id = await invoke<number>("serial_open", { config });
+      if (!tabsRef.current.some((t) => t.key === tab.key)) { await invoke("serial_close", { id }); return; }
+      setTabs((current) => current.map((t) => t.key === tab.key ? { ...t, sessionId: id, consoleConfig: config, status: "running", title: `${path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}` } : t));
+      setStatus(`Console reconnected: ${path}`);
+    } catch (error) { if (!automatic) setStatus(String(error)); }
+    finally { reconnecting.current.delete(tab.key); }
+  };
+  const reconnectRef = useRef(reconnectConsole);
+  reconnectRef.current = reconnectConsole;
+  useEffect(() => {
+    if (!isTauri()) return;
+    const timer = window.setInterval(() => {
+      for (const tab of tabsRef.current) {
+        if (tab.transport === "serial" && tab.status === "exited" && tab.consoleConfig?.autoReconnect && tab.consoleConfig.identity)
+          void reconnectRef.current(tab, true);
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
   const activePane = () => panes.current.get(activeRef.current) ?? null;
 
   const addTab = useCallback(() => {
@@ -251,7 +281,7 @@ export default function App() {
         {tabs.map((tab) =>
           tab.sessionId == null ? null : (
             <TerminalPane
-              key={tab.key}
+              key={`${tab.key}-${tab.sessionId}`}
               ref={(handle) => {
                 panes.current.set(tab.key, handle);
               }}
@@ -283,7 +313,7 @@ export default function App() {
           {context?.production ? " · prod" : ""}
         </span>
       </footer>
-      {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools key={activeTab.sessionId} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
+      {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools key={activeTab.sessionId} onReconnect={() => void reconnectConsole(activeTab)} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
       {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)} />}
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />

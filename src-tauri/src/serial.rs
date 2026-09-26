@@ -134,6 +134,7 @@ impl Consoles {
 pub struct Port {
     path: String,
     label: String,
+    identity: Option<String>,
 }
 #[tauri::command]
 pub fn serial_ports() -> Result<Vec<Port>, String> {
@@ -141,6 +142,14 @@ pub fn serial_ports() -> Result<Vec<Port>, String> {
         .map_err(|e| e.to_string())?
         .into_iter()
         .map(|port| {
+            let identity = match &port.port_type {
+                serialport::SerialPortType::UsbPort(info) => info
+                    .serial_number
+                    .as_ref()
+                    .filter(|s| !s.is_empty())
+                    .map(|s| format!("usb:{:04x}:{:04x}:{}", info.vid, info.pid, s)),
+                _ => None,
+            };
             let description = match port.port_type {
                 serialport::SerialPortType::UsbPort(info) => {
                     info.product.unwrap_or_else(|| "USB serial".into())
@@ -150,6 +159,7 @@ pub fn serial_ports() -> Result<Vec<Port>, String> {
             Port {
                 label: format!("{} — {}", port.port_name, description),
                 path: port.port_name,
+                identity,
             }
         })
         .collect();
