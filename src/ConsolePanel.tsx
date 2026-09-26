@@ -1,3 +1,6 @@
+import { VENDOR_PROFILES, vendorProfile } from "./vendors/index.ts";
+import { applyProfile } from "./vendors/types.ts";
+import { ConsoleProfileNotes } from "./ConsoleProfileNotes.tsx";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./native.ts";
@@ -24,6 +27,11 @@ export function ConsolePanel({ onConnect, onClose }: {
       event.preventDefault(); setBusy(true); setError("");
       try { await onConnect({ ...config, identity: ports.find((p) => p.path === config.path)?.identity ?? undefined }); onClose(); } catch (e) { setError(String(e)); } finally { setBusy(false); }
     }}>
+      <label>Device profile<select value={config.profileId} onChange={(e) => {
+        const profile = vendorProfile(e.target.value);
+        setConfig(profile ? applyProfile(config, profile) : { ...config, ...DEFAULT_CONSOLE, path: config.path, production: config.production });
+      }}><option value="generic">Generic serial console</option>{VENDOR_PROFILES.map((p) => <option key={p.id} value={p.id}>{p.vendor} · {p.label}</option>)}</select></label>
+      {vendorProfile(config.profileId) && <ConsoleProfileNotes profile={vendorProfile(config.profileId)!} />}
       <label>Detected devices<select value={ports.some((p) => p.path === config.path) ? config.path : ""} onChange={(e) => setConfig({ ...config, path: e.target.value })}>
         <option value="" disabled>Select a device or enter its path</option>
         {ports.map((p) => <option key={p.path} value={p.path}>{p.label}</option>)}

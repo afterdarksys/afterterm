@@ -1,6 +1,9 @@
+import { vendorProfile } from "./vendors/index.ts";
+import { ConsoleProfileNotes } from "./ConsoleProfileNotes.tsx";
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-export function ConsoleTools({ id, disabled, onStatus, onReconnect }: { onReconnect: () => void; id: number; disabled: boolean; onStatus: (message: string) => void }) {
+export function ConsoleTools({ id, disabled, onStatus, onReconnect, profileId, onHelper }: { profileId: string; onHelper: (text: string) => void; onReconnect: () => void; id: number; disabled: boolean; onStatus: (message: string) => void }) {
+  const profile = vendorProfile(profileId);
   const [duration, setDuration] = useState(250);
   const [busy, setBusy] = useState(false);
   const control = async (action: string, value = false) => {
@@ -12,6 +15,13 @@ export function ConsoleTools({ id, disabled, onStatus, onReconnect }: { onReconn
     <summary>Console controls</summary>
     <div>
       <button disabled={!disabled || busy} onClick={onReconnect}>Reconnect</button>
+      {profile && <details><summary>{profile.vendor} · {profile.label}</summary><ConsoleProfileNotes profile={profile} />
+        {profile.helpers.map((helper) => <div key={helper.label} className="console-helper">
+          <strong>{helper.label} · {helper.scope === "device" ? "Changes device configuration" : "Session setting"}</strong>
+          <p>{helper.description}</p><pre>{helper.command}</pre>
+          <button disabled={disabled || busy} onClick={() => onHelper(helper.command)}>Review before sending</button>
+        </div>)}
+      </details>}
       <label>BREAK duration (ms)<input type="number" min={50} max={2000} value={duration} onChange={(e) => setDuration(Number(e.target.value))} /></label>
       <button disabled={disabled || busy} onClick={() => void control("break")}>Send BREAK</button>
       <button disabled={disabled || busy} onClick={() => void control("interrupt")}>Send Ctrl+C</button>

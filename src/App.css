@@ -277,3 +277,9 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 
 .paste-card { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; background: var(--ink); }
 .paste-card textarea { background: var(--panel); color: var(--text); font: 13px var(--mono); padding: 8px; border: 1px solid var(--line); width: 100%; resize: vertical; }
+
+.profile-notes { font: 12px/1.5 var(--mono); color: var(--muted); }
+.profile-notes a { display: block; color: var(--accent); }
+.profile-notes ul { padding-left: 18px; }
+.console-tools { max-height: calc(100dvh - 110px); overflow-y: auto; }
+.console-helper { border-top: 1px solid var(--line); padding-block: 8px; }
