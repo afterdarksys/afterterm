@@ -1,5 +1,7 @@
 mod prefs;
 mod serial;
+mod ssh;
+use ssh::ssh_algorithms;
 use serial::{serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close, serial_control, serial_paste, serial_cancel_paste};
 
 use std::path::PathBuf;
@@ -233,6 +235,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
             serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close, serial_control, serial_paste, serial_cancel_paste,
+            ssh_algorithms,
             pty_spawn,
             pty_write,
             pty_confirm,
@@ -268,6 +271,7 @@ mod registration_tests {
         let end = start + lib[start..].find(']').expect("end of handler list");
         let handler = &lib[start..end];
         for name in [
+            "ssh_algorithms",
             "serial_ports", "serial_open", "serial_attach", "serial_write", "serial_confirm", "serial_close", "serial_control", "serial_paste", "serial_cancel_paste",
             "pty_spawn",
             "pty_write",

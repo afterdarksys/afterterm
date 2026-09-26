@@ -1,3 +1,4 @@
+import { SshPanel } from "./SshPanel.tsx";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
@@ -36,6 +37,7 @@ export default function App() {
   const [activeKey, setActiveKey] = useState("tab-1");
   const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
   const [paste, setPaste] = useState<{ id: number; text: string; config: ConsoleConfig } | null>(null);
+  const [sshOpen, setSshOpen] = useState(false);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
@@ -305,8 +307,9 @@ export default function App() {
         )}
       </main>
       <footer className="status">
-        <button onClick={() => { setConsoleOpen(true); setPrefsOpen(false); }}>Connect console</button>
-        <button onClick={() => { setPrefsOpen(true); setConsoleOpen(false); }}>Appearance</button>
+        <button onClick={() => { setConsoleOpen(true); setPrefsOpen(false); setSshOpen(false); }}>Connect console</button>
+        <button onClick={() => { setPrefsOpen(true); setConsoleOpen(false); setSshOpen(false); }}>Appearance</button>
+        <button onClick={() => { setSshOpen(true); setConsoleOpen(false); setPrefsOpen(false); }}>SSH compatibility</button>
         <span>{status}</span>
         <span>
           {activeTab?.transport === "serial" ? "serial console" : context?.kube_context ? `k8s ${context.kube_context}` : "local"}
@@ -314,6 +317,7 @@ export default function App() {
         </span>
       </footer>
       {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools profileId={activeTab.consoleConfig?.profileId ?? "generic"} onHelper={(text) => { if (activeTab.consoleConfig && activeTab.sessionId != null) setPaste({ id: activeTab.sessionId, text, config: activeTab.consoleConfig }); }} key={activeTab.sessionId} onReconnect={() => void reconnectConsole(activeTab)} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
+      {sshOpen && <SshPanel onClose={() => setSshOpen(false)} />}
       {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)} />}
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />
