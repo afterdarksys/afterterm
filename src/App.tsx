@@ -7,6 +7,7 @@ import { FindBar } from "./FindBar.tsx";
 import { matchAction } from "./keybindings.ts";
 import { isTauri } from "./native.ts";
 import { DEFAULT_PREFS, fromWire, toWire, type Prefs } from "./prefs.ts";
+import { ConsolePaste } from "./ConsolePaste.tsx";
 import { ConsoleTools } from "./ConsoleTools.tsx";
 import { ConsolePanel, type ConsoleConfig } from "./ConsolePanel.tsx";
 import { PrefsPanel } from "./PrefsPanel.tsx";
@@ -33,6 +34,7 @@ export default function App() {
   ]);
   const [activeKey, setActiveKey] = useState("tab-1");
   const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
+  const [paste, setPaste] = useState<{ id: number; text: string; config: ConsoleConfig } | null>(null);
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
@@ -256,6 +258,7 @@ export default function App() {
               sessionId={tab.sessionId}
               transport={tab.transport}
               consoleConfig={tab.consoleConfig}
+              onPaste={(text) => { if (tab.consoleConfig && tab.sessionId != null) setPaste({ id: tab.sessionId, text, config: tab.consoleConfig }); }}
               onChallenge={(id, next) => { setChallenge({ id, challenge: next, transport: "serial" }); setTyped(""); }}
               active={tab.key === activeKey}
               prefs={prefs}
@@ -285,6 +288,7 @@ export default function App() {
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />
       )}
+      {paste && <ConsolePaste {...paste} onClose={() => setPaste(null)} onStatus={setStatus} />}
       {challenge && (
         <ConfirmDialog
           challenge={challenge.challenge}

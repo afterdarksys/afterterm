@@ -69,9 +69,14 @@ struct Session {
     reader: Option<std::thread::JoinHandle<()>>,
     config: Config,
     pending: Option<Vec<u8>>,
+    transferring: Arc<AtomicBool>,
+    cancel_transfer: Arc<AtomicBool>,
 }
 impl Session {
     fn write(&mut self, data: String) -> Result<Option<afterterm_pty::Challenge>, String> {
+        if self.transferring.load(Ordering::SeqCst) {
+            return Err("A paste is in progress; cancel it before typing".into());
+        }
         if self.stop.load(Ordering::SeqCst) {
             return Err("Console disconnected; close the tab and reconnect".into());
         }
@@ -116,6 +121,7 @@ impl Consoles {
     pub fn shutdown(&self) {
         if let Ok(mut sessions) = self.0.lock() {
             for (_, mut session) in sessions.drain() {
+                session.cancel_transfer.store(true, Ordering::SeqCst);
                 session.stop.store(true, Ordering::SeqCst);
                 if let Some(reader) = session.reader.take() {
                     let _ = reader.join();
@@ -169,6 +175,8 @@ pub fn serial_open(state: State<Consoles>, config: Config) -> Result<u64, String
             reader: None,
             config,
             pending: None,
+            transferring: Arc::new(AtomicBool::new(false)),
+            cancel_transfer: Arc::new(AtomicBool::new(false)),
         },
     );
     Ok(id)
@@ -261,7 +269,10 @@ pub async fn serial_control(
     let mut port = {
         let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
         let session = sessions.get_mut(&id).ok_or("Console is closed")?;
-        if session.stop.load(Ordering::SeqCst) || session.pending.is_some() {
+        if session.stop.load(Ordering::SeqCst)
+            || session.pending.is_some()
+            || session.transferring.load(Ordering::SeqCst)
+        {
             return Err("Console disconnected or awaiting review".into());
         }
         if action == "rts" && session.config.flow_control == "hardware" {
@@ -291,6 +302,129 @@ pub async fn serial_control(
     .await
     .map_err(|e| e.to_string())?
 }
+
+#[derive(Clone, Serialize)]
+struct PasteProgress {
+    id: u64,
+    sent: usize,
+    total: usize,
+}
+struct TransferGuard(Arc<AtomicBool>);
+impl Drop for TransferGuard {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
+    }
+}
+
+fn paced_write(
+    port: &mut dyn Write,
+    data: &[u8],
+    char_delay: u64,
+    line_delay: u64,
+    cancelled: impl Fn() -> bool,
+    mut progress: impl FnMut(usize),
+) -> Result<(), String> {
+    for (index, byte) in data.iter().enumerate() {
+        if cancelled() {
+            return Err("Paste cancelled; already transmitted bytes cannot be recalled".into());
+        }
+        port.write_all(&[*byte])
+            .map_err(|e| format!("Paste stopped after {index} bytes: {e}"))?;
+        progress(index + 1);
+        let end_of_line = *byte == b'\n' || (*byte == b'\r' && data.get(index + 1) != Some(&b'\n'));
+        let delay = char_delay + if end_of_line { line_delay } else { 0 };
+        let until = std::time::Instant::now() + Duration::from_millis(delay);
+        while std::time::Instant::now() < until {
+            if cancelled() {
+                return Err("Paste cancelled; already transmitted bytes cannot be recalled".into());
+            }
+            std::thread::sleep(
+                Duration::from_millis(5)
+                    .min(until.saturating_duration_since(std::time::Instant::now())),
+            );
+        }
+    }
+    Ok(())
+}
+#[tauri::command]
+pub async fn serial_paste(
+    app: AppHandle,
+    state: State<'_, Consoles>,
+    id: u64,
+    data: String,
+    typed: Option<String>,
+    char_delay: u64,
+    line_delay: u64,
+) -> Result<(), String> {
+    if data.is_empty() || data.len() > 65536 || char_delay > 100 || line_delay > 2000 {
+        return Err(
+            "Paste must be 1–65536 bytes; delays at most 100 ms/character and 2000 ms/line".into(),
+        );
+    }
+    if data
+        .chars()
+        .any(|c| c.is_control() && !matches!(c, '\t' | '\r' | '\n'))
+    {
+        return Err(
+            "Paste contains control characters; use explicit console controls instead".into(),
+        );
+    }
+    let (mut port, stop, cancelled, busy) = {
+        let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
+        let session = sessions.get_mut(&id).ok_or("Console is closed")?;
+        if session.stop.load(Ordering::SeqCst) || session.pending.is_some() {
+            return Err("Console disconnected or awaiting review".into());
+        }
+        if session.config.production && typed.as_deref() != Some(session.config.path.as_str()) {
+            return Err("Type the production device path to approve this paste".into());
+        }
+        if session.transferring.load(Ordering::SeqCst) {
+            return Err("A paste is already in progress".into());
+        }
+        let port = session.port.try_clone().map_err(|e| e.to_string())?;
+        session.cancel_transfer.store(false, Ordering::SeqCst);
+        session.transferring.store(true, Ordering::SeqCst);
+        (
+            port,
+            session.stop.clone(),
+            session.cancel_transfer.clone(),
+            session.transferring.clone(),
+        )
+    };
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = TransferGuard(busy);
+        let mut last = std::time::Instant::now();
+        paced_write(
+            &mut port,
+            data.as_bytes(),
+            char_delay,
+            line_delay,
+            || stop.load(Ordering::SeqCst) || cancelled.load(Ordering::SeqCst),
+            |sent| {
+                if last.elapsed() >= Duration::from_millis(100) || sent == data.len() {
+                    let _ = app.emit(
+                        "serial:paste-progress",
+                        PasteProgress {
+                            id,
+                            sent,
+                            total: data.len(),
+                        },
+                    );
+                    last = std::time::Instant::now();
+                }
+            },
+        )
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
+pub fn serial_cancel_paste(state: State<Consoles>, id: u64) -> Result<(), String> {
+    let sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
+    let session = sessions.get(&id).ok_or("Console is closed")?;
+    session.cancel_transfer.store(true, Ordering::SeqCst);
+    Ok(())
+}
 #[tauri::command]
 pub fn serial_close(state: State<Consoles>, id: u64) -> Result<(), String> {
     let session = state
@@ -299,6 +433,7 @@ pub fn serial_close(state: State<Consoles>, id: u64) -> Result<(), String> {
         .map_err(|_| "Console state unavailable")?
         .remove(&id);
     if let Some(mut session) = session {
+        session.cancel_transfer.store(true, Ordering::SeqCst);
         session.stop.store(true, Ordering::SeqCst);
         if let Some(reader) = session.reader.take() {
             let _ = reader.join();
@@ -310,6 +445,24 @@ pub fn serial_close(state: State<Consoles>, id: u64) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn paced_paste_cancels_without_sending_remaining_newline() {
+        let mut output = Vec::new();
+        let sent = std::cell::Cell::new(0);
+        let result = paced_write(
+            &mut output,
+            b"abc\r",
+            0,
+            0,
+            || sent.get() == 2,
+            |n| sent.set(n),
+        );
+        assert!(result.is_err());
+        assert_eq!(output, b"ab");
+        let mut full = Vec::new();
+        paced_write(&mut full, b"a\r\nb\r", 0, 0, || false, |_| {}).unwrap();
+        assert_eq!(full, b"a\r\nb\r");
+    }
     #[test]
     fn production_serial_holds_enter_and_cancel_discards_paste() {
         let (port, mut peer) = serialport::TTYPort::pair().unwrap();
@@ -329,6 +482,8 @@ mod tests {
             reader: None,
             config,
             pending: None,
+            transferring: Arc::new(AtomicBool::new(false)),
+            cancel_transfer: Arc::new(AtomicBool::new(false)),
         };
         assert!(session.write("show version\r".into()).unwrap().is_some());
         let mut buf = [0u8; 64];
@@ -356,6 +511,7 @@ mod tests {
         peer.write_all(b"console output\r\n").unwrap();
         let n = session.port.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"console output\r\n");
+        session.cancel_transfer.store(true, Ordering::SeqCst);
         session.stop.store(true, Ordering::SeqCst);
         assert!(session.write("x".into()).is_err());
     }

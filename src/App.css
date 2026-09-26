@@ -274,3 +274,6 @@ body {
 .console-tools input { width: 90px; }
 .console-tools p { margin: 0; color: var(--muted); }
 button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+.paste-card { width: min(680px, calc(100vw - 32px)); max-height: calc(100dvh - 32px); overflow-y: auto; background: var(--ink); }
+.paste-card textarea { background: var(--panel); color: var(--text); font: 13px var(--mono); padding: 8px; border: 1px solid var(--line); width: 100%; resize: vertical; }

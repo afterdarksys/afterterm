@@ -38,6 +38,7 @@ type Props = {
   sessionId: number;
   consoleConfig?: ConsoleConfig;
   transport?: "pty" | "serial";
+  onPaste: (text: string) => void;
   onChallenge: (id: number, challenge: Challenge) => void;
   active: boolean;
   prefs: Prefs;
@@ -46,7 +47,7 @@ type Props = {
 };
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { sessionId, consoleConfig, transport = "pty", onChallenge, active, prefs, onTitle, onStatus },
+  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, active, prefs, onTitle, onStatus },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -62,6 +63,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
+  const pasteRef = useRef(onPaste);
+  pasteRef.current = onPaste;
   const challengeRef = useRef(onChallenge);
   challengeRef.current = onChallenge;
   const resize = (rows: number, cols: number) => transport === "serial" ? Promise.resolve() : invoke("pty_resize", { id: sessionRef.current, rows, cols });
@@ -90,7 +93,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     clear: () => termRef.current?.clear(),
     copySelection: () => termRef.current?.getSelection() ?? "",
     paste: (text: string) => {
-      void write(text);
+      if (transport === "serial") pasteRef.current(text); else void write(text);
     },
     findNext: (query: string) => {
       searchRef.current?.findNext(query);
@@ -256,5 +259,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     });
   }, [active]);
 
-  return <div className={`term-host ${active ? "is-active" : "is-inactive"}`} ref={hostRef} />;
+  return <div className={`term-host ${active ? "is-active" : "is-inactive"}`} ref={hostRef} onPasteCapture={(event) => {
+    if (transport !== "serial") return;
+    event.preventDefault(); event.stopPropagation(); pasteRef.current(event.clipboardData.getData("text/plain"));
+  }} />;
 });
