@@ -1,5 +1,7 @@
 # AfterTerm
 
+**The terminal for the datacenter.**
+
 Terminal emulator for security engineers, network engineers, and developers.
 macOS and Linux. Its own product, its own install, its own window.
 
@@ -39,3 +41,34 @@ npm run tauri dev
 npm test
 cargo test --workspace
 ```
+
+## Direct console access
+
+Use **Connect console** in the desktop app to select a detected serial device
+or enter a `/dev/` path. Configure baud rate, 5–8 data bits, parity, stop bits,
+and software/hardware/no flow control. Defaults are 9600 baud, 8N1, no flow
+control; use the settings required by your equipment.
+
+This is native serial I/O, not an SSH session or a wrapper around `screen`.
+Use a compatible USB console cable or serial adapter with the correct pinout
+and electrical signaling for the device. On macOS, select the adapter's
+`/dev/cu.*` device; on Linux, use its accessible `/dev/ttyUSB*` or `/dev/ttyACM*`
+device. Required OS drivers and device permissions still apply.
+
+Production console mode holds each Enter or multiline paste until the device
+path is typed to confirm. Cancel drops the pending input and sends Ctrl+C.
+This is submission review, not vendor-specific command classification.
+Close the tab to release the port; after unplugging, close and reconnect.
+Serial sessions currently use UTF-8/xterm rendering and CR on Enter. Break
+signaling, reconnect profiles, alternate encodings, recording and remote
+sharing remain future work. Physical hardware qualification is still required.
+
+## Appearance and direction
+
+**Appearance → Customize palette** edits terminal and application colors per
+preset, including all 16 ANSI colors. Export/import palette JSON or reset the
+current palette. Desktop preferences retain overrides, scrollback and cursor
+motion settings.
+
+See [product direction](docs/PRODUCT-DIRECTION.md) for the staged access,
+emulation, recording, collaboration and enterprise roadmap.

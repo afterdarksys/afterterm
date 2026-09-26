@@ -1,5 +1,8 @@
+import { cleanOverrides, type ThemeOverrides } from "./themes.ts";
+
 export type Prefs = {
   theme: string;
+  themeOverrides: Record<string, ThemeOverrides>;
   fontFamily: string;
   fontSize: number;
   transparency: number;
@@ -11,6 +14,7 @@ export type Prefs = {
 
 export const DEFAULT_PREFS: Prefs = {
   theme: "signal",
+  themeOverrides: {},
   fontFamily: "SF Mono, Menlo, JetBrains Mono, ui-monospace, monospace",
   fontSize: 13,
   transparency: 0.82,
@@ -22,6 +26,7 @@ export const DEFAULT_PREFS: Prefs = {
 
 type WirePrefs = {
   theme: string;
+  theme_overrides?: Record<string, ThemeOverrides>;
   font_family: string;
   font_size: number;
   transparency: number;
@@ -35,6 +40,7 @@ export function fromWire(wire: WirePrefs): Prefs {
   const cursor = wire.cursor_style;
   return {
     theme: wire.theme,
+    themeOverrides: Object.fromEntries(Object.entries(wire.theme_overrides ?? {}).map(([id, colors]) => [id, cleanOverrides(colors)])),
     fontFamily: wire.font_family,
     fontSize: wire.font_size,
     transparency: wire.transparency,
@@ -48,6 +54,7 @@ export function fromWire(wire: WirePrefs): Prefs {
 export function toWire(prefs: Prefs): WirePrefs {
   return {
     theme: prefs.theme,
+    theme_overrides: prefs.themeOverrides,
     font_family: prefs.fontFamily,
     font_size: prefs.fontSize,
     transparency: prefs.transparency,

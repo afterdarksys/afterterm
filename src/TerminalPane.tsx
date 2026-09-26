@@ -7,6 +7,7 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import type { Challenge } from "./ConfirmDialog.tsx";
 import type { Prefs } from "./prefs.ts";
 import { resolveTheme, withAlpha } from "./themes.ts";
 
@@ -34,6 +35,8 @@ export type TerminalPaneHandle = {
 
 type Props = {
   sessionId: number;
+  transport?: "pty" | "serial";
+  onChallenge: (id: number, challenge: Challenge) => void;
   active: boolean;
   prefs: Prefs;
   onTitle: (title: string) => void;
@@ -41,7 +44,7 @@ type Props = {
 };
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { sessionId, active, prefs, onTitle, onStatus },
+  { sessionId, transport = "pty", onChallenge, active, prefs, onTitle, onStatus },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -57,6 +60,16 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
 
+  const challengeRef = useRef(onChallenge);
+  challengeRef.current = onChallenge;
+  const resize = (rows: number, cols: number) => transport === "serial" ? Promise.resolve() : invoke("pty_resize", { id: sessionRef.current, rows, cols });
+  const write = async (data: string) => {
+    try {
+      const challenge = await invoke<Challenge | null>(`${transport}_write`, { id: sessionRef.current, data });
+      if (transport === "serial" && challenge) challengeRef.current(sessionRef.current, challenge);
+    } catch (error) { onStatusRef.current(`Write failed: ${String(error)}`); }
+  };
+
   useImperativeHandle(ref, () => ({
     focus: () => termRef.current?.focus(),
     fit: () => {
@@ -65,7 +78,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       if (!term || !fit) return;
       try {
         fit.fit();
-        void invoke("pty_resize", { id: sessionRef.current, rows: term.rows, cols: term.cols });
+        void resize(term.rows, term.cols);
       } catch {
         /* layout not ready */
       }
@@ -73,7 +86,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     clear: () => termRef.current?.clear(),
     copySelection: () => termRef.current?.getSelection() ?? "",
     paste: (text: string) => {
-      void invoke("pty_write", { id: sessionRef.current, data: text });
+      void write(text);
     },
     findNext: (query: string) => {
       searchRef.current?.findNext(query);
@@ -88,7 +101,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const host = hostRef.current;
     if (!host) return;
 
-    const theme = withAlpha(resolveTheme(prefsRef.current.theme).terminal, prefsRef.current.transparency);
+    const theme = withAlpha(resolveTheme(prefsRef.current.theme, prefsRef.current.themeOverrides[prefsRef.current.theme]).terminal, prefsRef.current.transparency);
     const term = new Terminal({
       fontFamily: prefsRef.current.fontFamily,
       fontSize: prefsRef.current.fontSize,
@@ -130,7 +143,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       cancelAnimationFrame(frame);
       frame = requestAnimationFrame(() => {
         if (!refit()) return;
-        void invoke("pty_resize", { id: sessionRef.current, rows: term.rows, cols: term.cols }).catch(() => {
+        void resize(term.rows, term.cols).catch(() => {
           /* session may still be starting */
         });
       });
@@ -139,14 +152,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const connect = async () => {
       try {
         const [onOutput, onExit] = await Promise.all([
-          listen<{ id: number; data: string }>("pty:output", (event) => {
+          listen<{ id: number; data: string }>(`${transport}:output`, (event) => {
             if (event.payload.id !== sessionRef.current) return;
             term.write(decodeChunk(event.payload.data));
           }),
-          listen<{ id: number; code: number }>("pty:exit", (event) => {
+          listen<{ id: number; code: number }>(`${transport}:exit`, (event) => {
             if (event.payload.id !== sessionRef.current) return;
-            onStatusRef.current(`Shell exited with code ${event.payload.code}`);
-            term.writeln(`\r\n\x1b[90m[shell exited with code ${event.payload.code}]\x1b[0m`);
+            onStatusRef.current(`${transport === "serial" ? "Console disconnected" : `Shell exited with code ${event.payload.code}`}`);
+            term.writeln(`\r\n\x1b[90m[${transport === "serial" ? "console disconnected" : `shell exited with code ${event.payload.code}`}]\x1b[0m`);
           }),
         ]);
         if (disposed) {
@@ -155,9 +168,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
           return;
         }
         listeners = [onOutput, onExit];
+        if (transport === "serial") await invoke("serial_attach", { id: sessionRef.current });
       } catch (error) {
         if (!disposed) {
-          onStatusRef.current(`Could not attach shell: ${String(error)}`);
+          onStatusRef.current(`Could not attach terminal: ${String(error)}`);
         }
       }
     };
@@ -184,16 +198,14 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       observer = new ResizeObserver(scheduleRefit);
       observer.observe(host);
       void connect();
-      void invoke("pty_resize", { id: sessionRef.current, rows: term.rows, cols: term.cols }).catch(() => {
+      void resize(term.rows, term.cols).catch(() => {
         /* first fit */
       });
     };
     frame = requestAnimationFrame(startWhenLaidOut);
 
     const input = term.onData((data) => {
-      void invoke("pty_write", { id: sessionRef.current, data }).catch((error) => {
-        term.writeln(`\r\n\x1b[31m[write failed: ${String(error)}]\x1b[0m`);
-      });
+      void write(data);
     });
     const title = term.onTitleChange((value) => onTitleRef.current(value || "shell"));
 
@@ -214,7 +226,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const term = termRef.current;
     if (!term) return;
     const id = requestAnimationFrame(() => {
-      term.options.theme = withAlpha(resolveTheme(prefs.theme).terminal, prefs.transparency);
+      term.options.theme = withAlpha(resolveTheme(prefs.theme, prefs.themeOverrides[prefs.theme]).terminal, prefs.transparency);
       term.options.fontFamily = prefs.fontFamily;
       term.options.fontSize = prefs.fontSize;
       term.options.cursorStyle = prefs.cursorStyle;
@@ -233,7 +245,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     requestAnimationFrame(() => {
       try {
         fit.fit();
-        void invoke("pty_resize", { id: sessionRef.current, rows: term.rows, cols: term.cols });
+        void resize(term.rows, term.cols);
       } catch {
         /* layout */
       }

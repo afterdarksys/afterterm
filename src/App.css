@@ -30,7 +30,7 @@ body {
 
 .shell {
   display: grid;
-  grid-template-rows: auto auto 1fr auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   height: 100%;
   min-height: 0;
 }
@@ -249,3 +249,21 @@ body {
 }
 
 .crash pre { white-space: pre-wrap; color: var(--danger); }
+
+.prefs { width: min(380px, calc(100vw - 24px)); max-height: calc(100dvh - 72px); overflow-y: auto; z-index: 10; }
+.palette-editor { border-block: 1px solid var(--line); padding-block: 12px; }
+.palette-editor summary { cursor: pointer; color: var(--accent); font-size: 13px; }
+.palette-editor > * + * { margin-top: 12px; }
+.palette-editor fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 10px; min-width: 0; }
+.palette-editor legend { font-size: 12px; color: var(--text); }
+.color-field span { display: flex; align-items: center; gap: 8px; }
+.color-field i { width: 14px; height: 14px; border: 1px solid var(--muted); border-radius: 3px; }
+.color-field input { width: 100%; }
+.color-field input[aria-invalid="true"] { border-color: var(--danger); }
+.palette-editor textarea { width: 100%; resize: vertical; background: var(--ink); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 8px; font: 12px var(--mono); }
+.palette-actions { display: flex; gap: 8px; }
+
+.console-form { display: grid; gap: 12px; }
+.status button { background: transparent; border: 1px solid var(--line); border-radius: 5px; color: var(--text); padding: 4px 8px; cursor: pointer; }
+
+.shell:has(.findbar) { grid-template-rows: auto auto minmax(0, 1fr) auto; }

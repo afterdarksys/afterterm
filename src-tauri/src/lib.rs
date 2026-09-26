@@ -1,4 +1,6 @@
 mod prefs;
+mod serial;
+use serial::{serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -222,6 +224,7 @@ pub fn run() {
             let sink = Arc::new(AppSink {
                 app: app.handle().clone(),
             });
+            app.manage(serial::Consoles::default());
             app.manage(PtyHandle(Arc::new(SessionManager::new(sink))));
             apply_window_effects(app).map_err(|e| Box::<dyn std::error::Error>::from(e))?;
             install_menu(app)?;
@@ -229,6 +232,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close,
             pty_spawn,
             pty_write,
             pty_confirm,
@@ -247,6 +251,7 @@ pub fn run() {
         .expect("error while building AfterTerm")
         .run(|app, event| {
             if let RunEvent::Exit = event {
+                if let Some(consoles) = app.try_state::<serial::Consoles>() { consoles.shutdown(); }
                 if let Some(handle) = app.try_state::<PtyHandle>() {
                     handle.0.shutdown();
                 }
@@ -263,6 +268,7 @@ mod registration_tests {
         let end = start + lib[start..].find(']').expect("end of handler list");
         let handler = &lib[start..end];
         for name in [
+            "serial_ports", "serial_open", "serial_attach", "serial_write", "serial_confirm", "serial_close",
             "pty_spawn",
             "pty_write",
             "pty_confirm",

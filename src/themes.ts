@@ -199,8 +199,48 @@ export const THEMES: Record<ThemeId, ThemeDef> = {
 
 export const THEME_IDS = Object.keys(THEMES) as ThemeId[];
 
-export function resolveTheme(id: string): ThemeDef {
-  return THEMES[(id in THEMES ? id : "signal") as ThemeId];
+export const TERMINAL_COLORS = [
+  "background", "foreground", "cursor", "cursorAccent", "selectionBackground",
+  "selectionForeground", "selectionInactiveBackground", "overviewRulerBorder",
+  "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+  "brightBlack", "brightRed", "brightGreen", "brightYellow", "brightBlue",
+  "brightMagenta", "brightCyan", "brightWhite",
+] as const;
+export const CHROME_COLORS = ["ink", "panel", "line", "text", "muted", "accent", "danger"] as const;
+export type ThemeOverrides = {
+  terminal?: Partial<Record<typeof TERMINAL_COLORS[number], string>>;
+  chrome?: Partial<ThemeDef["chrome"]>;
+};
+
+// Portable JSON colors only: no CSS variables, URLs, or browser-specific parsing.
+export function validColor(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (/^#(?:[0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.test(value)) return true;
+  const match = /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(0(?:\.\d+)?|1(?:\.0+)?)\s*\)$/.exec(value);
+  return !!match && match.slice(1, 4).every((part) => Number(part) <= 255);
+}
+
+export function cleanOverrides(value: unknown): ThemeOverrides {
+  const result: ThemeOverrides = {};
+  if (!value || typeof value !== "object") return result;
+  for (const [group, keys] of [["terminal", TERMINAL_COLORS], ["chrome", CHROME_COLORS]] as const) {
+    const source = (value as Record<string, unknown>)[group];
+    if (!source || typeof source !== "object") continue;
+    const colors: Record<string, string> = {};
+    for (const key of keys) {
+      const color = (source as Record<string, unknown>)[key];
+      if (validColor(color)) colors[key] = color;
+    }
+    if (Object.keys(colors).length) result[group] = colors;
+  }
+  return result;
+}
+
+export function resolveTheme(id: string, overrides?: ThemeOverrides): ThemeDef {
+  const base = THEMES[(Object.prototype.hasOwnProperty.call(THEMES, id) ? id : "signal") as ThemeId];
+  if (!overrides) return base;
+  const clean = cleanOverrides(overrides);
+  return { ...base, chrome: { ...base.chrome, ...clean.chrome }, terminal: { ...base.terminal, ...clean.terminal } };
 }
 
 export function withAlpha(theme: ITheme, transparency: number): ITheme {

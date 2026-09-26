@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::PathBuf;
 use tauri::{AppHandle, Manager};
@@ -6,6 +7,8 @@ use tauri::{AppHandle, Manager};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Prefs {
     pub theme: String,
+    #[serde(default)]
+    pub theme_overrides: BTreeMap<String, ThemeOverrides>,
     pub font_family: String,
     pub font_size: u8,
     pub transparency: f32,
@@ -15,10 +18,19 @@ pub struct Prefs {
     pub ai_enabled: bool,
 }
 
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ThemeOverrides {
+    #[serde(default)]
+    pub terminal: BTreeMap<String, String>,
+    #[serde(default)]
+    pub chrome: BTreeMap<String, String>,
+}
+
 impl Default for Prefs {
     fn default() -> Self {
         Self {
             theme: "signal".into(),
+            theme_overrides: BTreeMap::new(),
             font_family: "SF Mono, Menlo, JetBrains Mono, ui-monospace, monospace".into(),
             font_size: 13,
             transparency: 0.82,
@@ -62,6 +74,23 @@ pub fn save(app: &AppHandle, prefs: &Prefs) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn legacy_preferences_and_palettes_round_trip() {
+        let mut value = serde_json::to_value(Prefs::default()).unwrap();
+        value.as_object_mut().unwrap().remove("theme_overrides");
+        let mut prefs: Prefs = serde_json::from_value(value).unwrap();
+        assert!(prefs.theme_overrides.is_empty());
+        let mut palette = ThemeOverrides::default();
+        palette.terminal.insert("red".into(), "#123456".into());
+        prefs.theme_overrides.insert("signal".into(), palette);
+        let restored: Prefs =
+            serde_json::from_str(&serde_json::to_string(&prefs).unwrap()).unwrap();
+        assert_eq!(
+            restored.theme_overrides["signal"].terminal["red"],
+            "#123456"
+        );
+    }
 
     #[test]
     fn defaults_are_sane() {

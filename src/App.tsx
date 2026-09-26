@@ -7,6 +7,7 @@ import { FindBar } from "./FindBar.tsx";
 import { matchAction } from "./keybindings.ts";
 import { isTauri } from "./native.ts";
 import { DEFAULT_PREFS, fromWire, toWire, type Prefs } from "./prefs.ts";
+import { ConsolePanel, type ConsoleConfig } from "./ConsolePanel.tsx";
 import { PrefsPanel } from "./PrefsPanel.tsx";
 import { TabBar, type Tab } from "./TabBar.tsx";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane.tsx";
@@ -31,11 +32,12 @@ export default function App() {
   ]);
   const [activeKey, setActiveKey] = useState("tab-1");
   const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
+  const [consoleOpen, setConsoleOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [status, setStatus] = useState(isTauri() ? "Starting shell…" : "Desktop app required");
-  const [challenge, setChallenge] = useState<{ id: number; challenge: Challenge } | null>(null);
+  const [challenge, setChallenge] = useState<{ id: number; challenge: Challenge; transport?: "pty" | "serial" } | null>(null);
   const [typed, setTyped] = useState("");
   const [context, setContext] = useState<ContextInfo | null>(null);
   const panes = useRef(new Map<string, TerminalPaneHandle | null>());
@@ -48,7 +50,7 @@ export default function App() {
   const handleMenuRef = useRef<(id: string) => void>(() => undefined);
 
   const activeTab = tabs.find((tab) => tab.key === activeKey) ?? tabs[0];
-  const theme = resolveTheme(prefs.theme);
+  const theme = resolveTheme(prefs.theme, prefs.themeOverrides[prefs.theme]);
 
   const spawning = useRef(new Set<string>());
   const spawnFor = useCallback(async (key: string, cwd?: string) => {
@@ -91,9 +93,12 @@ export default function App() {
       listen<{ id: number; code: number }>("pty:exit", (event) => {
         setTabs((current) =>
           current.map((tab) =>
-            tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab,
+            tab.transport !== "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab,
           ),
         );
+      }),
+      listen<{ id: number; code: number }>("serial:exit", (event) => {
+        setTabs((current) => current.map((tab) => tab.transport === "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab));
       }),
       listen<string>("afterterm:menu", (event) => {
         handleMenuRef.current(event.payload);
@@ -105,11 +110,12 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (activeTab?.transport === "serial") { setContext(null); return; }
     if (!isTauri() || !activeTab?.sessionId) return;
     void invoke<ContextInfo>("pty_context", { id: activeTab.sessionId })
       .then(setContext)
       .catch(() => setContext(null));
-  }, [activeTab?.sessionId]);
+  }, [activeTab?.sessionId, activeTab?.transport]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--ink", theme.chrome.ink);
@@ -123,7 +129,15 @@ export default function App() {
 
   const persistPrefs = (next: Prefs) => {
     setPrefs(next);
-    if (isTauri()) void invoke("prefs_save", { prefs: toWire(next) }).catch(() => undefined);
+    if (isTauri()) void invoke("prefs_save", { prefs: toWire(next) }).catch((error) => setStatus(`Preferences could not be saved: ${String(error)}`));
+  };
+
+  const connectConsole = async (config: ConsoleConfig) => {
+    const id = await invoke<number>("serial_open", { config });
+    const tab: Tab = { ...newTab(`${config.path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}`), transport: "serial", sessionId: id, status: "running" };
+    setTabs((current) => [...current, tab]);
+    setActiveKey(tab.key);
+    setStatus("Console connected");
   };
 
   const activePane = () => panes.current.get(activeRef.current) ?? null;
@@ -138,7 +152,7 @@ export default function App() {
   const closeTab = useCallback((key: string) => {
     const current = tabsRef.current;
     const tab = current.find((item) => item.key === key);
-    if (tab?.sessionId != null && isTauri()) void invoke("pty_kill", { id: tab.sessionId });
+    if (tab?.sessionId != null && isTauri()) void invoke(tab.transport === "serial" ? "serial_close" : "pty_kill", { id: tab.sessionId }).catch((error) => setStatus(String(error)));
     const remaining = current.filter((item) => item.key !== key);
     if (remaining.length === 0) {
       const fresh = newTab();
@@ -170,7 +184,7 @@ export default function App() {
     if (id === "term.clear") activePane()?.clear();
     if (id === "term.interrupt") {
       const tab = tabsRef.current.find((item) => item.key === activeRef.current);
-      if (tab?.sessionId != null) void invoke("pty_write", { id: tab.sessionId, data: "\u0003" });
+      if (tab?.sessionId != null) void invoke(`${tab.transport ?? "pty"}_write`, { id: tab.sessionId, data: "\u0003" }).catch((error) => setStatus(String(error)));
     }
     if (id === "term.prefs") setPrefsOpen(true);
     if (id === "term.find") setFindOpen(true);
@@ -180,6 +194,7 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
+      if (event.target instanceof HTMLElement && event.target.closest(".prefs, .confirm-card, .findbar")) return;
       const action = matchAction(event);
       if (!action) return;
       event.preventDefault();
@@ -201,12 +216,12 @@ export default function App() {
         void navigator.clipboard.readText().then((text) => activePane()?.paste(text));
       }
       if (action === "interrupt" && activeTab?.sessionId != null) {
-        void invoke("pty_write", { id: activeTab.sessionId, data: "\u0003" });
+        void invoke(`${activeTab.transport ?? "pty"}_write`, { id: activeTab.sessionId, data: "\u0003" }).catch((error) => setStatus(String(error)));
       }
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [activeTab?.sessionId]);
+  }, [activeTab?.sessionId, activeTab?.transport]);
 
   return (
     <div className="shell">
@@ -238,9 +253,12 @@ export default function App() {
                 panes.current.set(tab.key, handle);
               }}
               sessionId={tab.sessionId}
+              transport={tab.transport}
+              onChallenge={(id, next) => { setChallenge({ id, challenge: next, transport: "serial" }); setTyped(""); }}
               active={tab.key === activeKey}
               prefs={prefs}
               onTitle={(title) => {
+                if (tab.transport === "serial") return;
                 setTabs((current) =>
                   current.map((item) => (item.key === tab.key ? { ...item, title } : item)),
                 );
@@ -252,12 +270,15 @@ export default function App() {
         )}
       </main>
       <footer className="status">
+        <button onClick={() => { setConsoleOpen(true); setPrefsOpen(false); }}>Connect console</button>
+        <button onClick={() => { setPrefsOpen(true); setConsoleOpen(false); }}>Appearance</button>
         <span>{status}</span>
         <span>
-          {context?.kube_context ? `k8s ${context.kube_context}` : "local"}
+          {activeTab?.transport === "serial" ? "serial console" : context?.kube_context ? `k8s ${context.kube_context}` : "local"}
           {context?.production ? " · prod" : ""}
         </span>
       </footer>
+      {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)} />}
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />
       )}
@@ -267,12 +288,12 @@ export default function App() {
           typed={typed}
           onTyped={setTyped}
           onConfirm={() => {
-            void invoke("pty_confirm", { id: challenge.id, typed: typed.trim() });
+            void invoke(`${challenge.transport ?? "pty"}_confirm`, { id: challenge.id, typed: typed.trim() }).catch((error) => setStatus(String(error)));
             setChallenge(null);
             setTyped("");
           }}
           onCancel={() => {
-            void invoke("pty_confirm", { id: challenge.id, typed: null });
+            void invoke(`${challenge.transport ?? "pty"}_confirm`, { id: challenge.id, typed: null }).catch((error) => setStatus(String(error)));
             setChallenge(null);
             setTyped("");
           }}

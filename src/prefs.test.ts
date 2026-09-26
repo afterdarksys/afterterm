@@ -19,3 +19,14 @@ describe("prefs wire format", () => {
     assert.equal(prefs.cursorStyle, "bar");
   });
 });
+
+it("loads legacy preferences and preserves separate custom palettes", () => {
+  const legacy = toWire(DEFAULT_PREFS);
+  delete legacy.theme_overrides;
+  assert.deepEqual(fromWire(legacy).themeOverrides, {});
+  const prefs = { ...DEFAULT_PREFS, themeOverrides: {
+    signal: { terminal: { red: "#123456" } },
+    paper: { chrome: { accent: "#654321" } },
+  } };
+  assert.deepEqual(fromWire(toWire(prefs)), prefs);
+});

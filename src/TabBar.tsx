@@ -1,4 +1,5 @@
 export type Tab = {
+  transport?: "pty" | "serial";
   key: string;
   sessionId: number | null;
   title: string;
