@@ -1,4 +1,6 @@
+import type { ConsoleConfig } from "./console.ts";
 export type Tab = {
+  consoleConfig?: ConsoleConfig;
   transport?: "pty" | "serial";
   key: string;
   sessionId: number | null;

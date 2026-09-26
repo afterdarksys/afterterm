@@ -1,6 +1,6 @@
 mod prefs;
 mod serial;
-use serial::{serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close};
+use serial::{serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close, serial_control};
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -232,7 +232,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close,
+            serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close, serial_control,
             pty_spawn,
             pty_write,
             pty_confirm,
@@ -268,7 +268,7 @@ mod registration_tests {
         let end = start + lib[start..].find(']').expect("end of handler list");
         let handler = &lib[start..end];
         for name in [
-            "serial_ports", "serial_open", "serial_attach", "serial_write", "serial_confirm", "serial_close",
+            "serial_ports", "serial_open", "serial_attach", "serial_write", "serial_confirm", "serial_close", "serial_control",
             "pty_spawn",
             "pty_write",
             "pty_confirm",

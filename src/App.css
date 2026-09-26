@@ -267,3 +267,10 @@ body {
 .status button { background: transparent; border: 1px solid var(--line); border-radius: 5px; color: var(--text); padding: 4px 8px; cursor: pointer; }
 
 .shell:has(.findbar) { grid-template-rows: auto auto minmax(0, 1fr) auto; }
+.console-tools { position: fixed; left: 12px; bottom: 48px; z-index: 8; max-width: min(600px, calc(100vw - 24px)); border: 1px solid var(--line); border-radius: 8px; background: var(--ink); padding: 8px; font: 12px var(--mono); }
+.console-tools summary { cursor: pointer; color: var(--accent); }
+.console-tools > div { display: flex; flex-wrap: wrap; gap: 8px; padding-top: 8px; }
+.console-tools button, .console-tools input { background: var(--panel); color: var(--text); border: 1px solid var(--line); border-radius: 4px; padding: 6px; }
+.console-tools input { width: 90px; }
+.console-tools p { margin: 0; color: var(--muted); }
+button:disabled { opacity: 0.5; cursor: not-allowed; }

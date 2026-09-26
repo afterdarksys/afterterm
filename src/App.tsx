@@ -7,6 +7,7 @@ import { FindBar } from "./FindBar.tsx";
 import { matchAction } from "./keybindings.ts";
 import { isTauri } from "./native.ts";
 import { DEFAULT_PREFS, fromWire, toWire, type Prefs } from "./prefs.ts";
+import { ConsoleTools } from "./ConsoleTools.tsx";
 import { ConsolePanel, type ConsoleConfig } from "./ConsolePanel.tsx";
 import { PrefsPanel } from "./PrefsPanel.tsx";
 import { TabBar, type Tab } from "./TabBar.tsx";
@@ -134,7 +135,7 @@ export default function App() {
 
   const connectConsole = async (config: ConsoleConfig) => {
     const id = await invoke<number>("serial_open", { config });
-    const tab: Tab = { ...newTab(`${config.path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}`), transport: "serial", sessionId: id, status: "running" };
+    const tab: Tab = { ...newTab(`${config.path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}`), transport: "serial", consoleConfig: config, sessionId: id, status: "running" };
     setTabs((current) => [...current, tab]);
     setActiveKey(tab.key);
     setStatus("Console connected");
@@ -254,6 +255,7 @@ export default function App() {
               }}
               sessionId={tab.sessionId}
               transport={tab.transport}
+              consoleConfig={tab.consoleConfig}
               onChallenge={(id, next) => { setChallenge({ id, challenge: next, transport: "serial" }); setTyped(""); }}
               active={tab.key === activeKey}
               prefs={prefs}
@@ -278,6 +280,7 @@ export default function App() {
           {context?.production ? " · prod" : ""}
         </span>
       </footer>
+      {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools key={activeTab.sessionId} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
       {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)} />}
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />

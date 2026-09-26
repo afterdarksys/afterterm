@@ -251,6 +251,47 @@ pub fn serial_confirm(
     session.confirm(typed)
 }
 #[tauri::command]
+pub async fn serial_control(
+    state: State<'_, Consoles>,
+    id: u64,
+    action: String,
+    value: bool,
+    duration: u64,
+) -> Result<(), String> {
+    let mut port = {
+        let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
+        let session = sessions.get_mut(&id).ok_or("Console is closed")?;
+        if session.stop.load(Ordering::SeqCst) || session.pending.is_some() {
+            return Err("Console disconnected or awaiting review".into());
+        }
+        if action == "rts" && session.config.flow_control == "hardware" {
+            return Err("RTS is controlled by hardware flow control".into());
+        }
+        session.port.try_clone().map_err(|e| e.to_string())?
+    };
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
+        match action.as_str() {
+            "break" => {
+                if !(50..=2000).contains(&duration) {
+                    return Err("BREAK duration must be 50–2000 ms".into());
+                }
+                port.set_break().map_err(|e| e.to_string())?;
+                std::thread::sleep(Duration::from_millis(duration));
+                port.clear_break().map_err(|e| e.to_string())
+            }
+            "dtr" => port
+                .write_data_terminal_ready(value)
+                .map_err(|e| e.to_string()),
+            "rts" => port.write_request_to_send(value).map_err(|e| e.to_string()),
+            "interrupt" => port.write_all(&[3]).map_err(|e| e.to_string()),
+            "escape" => port.write_all(&[27]).map_err(|e| e.to_string()),
+            _ => Err("Unknown console control".into()),
+        }
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+#[tauri::command]
 pub fn serial_close(state: State<Consoles>, id: u64) -> Result<(), String> {
     let session = state
         .0

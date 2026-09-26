@@ -1,3 +1,4 @@
+import { consoleInput, type ConsoleConfig } from "./console.ts";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
@@ -35,6 +36,7 @@ export type TerminalPaneHandle = {
 
 type Props = {
   sessionId: number;
+  consoleConfig?: ConsoleConfig;
   transport?: "pty" | "serial";
   onChallenge: (id: number, challenge: Challenge) => void;
   active: boolean;
@@ -44,7 +46,7 @@ type Props = {
 };
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { sessionId, transport = "pty", onChallenge, active, prefs, onTitle, onStatus },
+  { sessionId, consoleConfig, transport = "pty", onChallenge, active, prefs, onTitle, onStatus },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -65,7 +67,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const resize = (rows: number, cols: number) => transport === "serial" ? Promise.resolve() : invoke("pty_resize", { id: sessionRef.current, rows, cols });
   const write = async (data: string) => {
     try {
+      if (consoleConfig) data = consoleInput(data, consoleConfig);
       const challenge = await invoke<Challenge | null>(`${transport}_write`, { id: sessionRef.current, data });
+      if (!challenge && consoleConfig?.localEcho) termRef.current?.write(data);
       if (transport === "serial" && challenge) challengeRef.current(sessionRef.current, challenge);
     } catch (error) { onStatusRef.current(`Write failed: ${String(error)}`); }
   };

@@ -2,14 +2,12 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./native.ts";
 
-export type ConsoleConfig = {
-  path: string; baud: number; data_bits: number; parity: string;
-  stop_bits: number; flow_control: string; production: boolean;
-};
+import { DEFAULT_CONSOLE, type ConsoleConfig } from "./console.ts";
+export type { ConsoleConfig } from "./console.ts";
 export function ConsolePanel({ onConnect, onClose }: {
   onConnect: (config: ConsoleConfig) => Promise<void>; onClose: () => void;
 }) {
-  const [config, setConfig] = useState<ConsoleConfig>({ path: "", baud: 9600, data_bits: 8, parity: "none", stop_bits: 1, flow_control: "none", production: true });
+  const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE);
   const [ports, setPorts] = useState<{ path: string; label: string }[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -37,8 +35,11 @@ export function ConsolePanel({ onConnect, onClose }: {
       <label>Parity<select value={config.parity} onChange={(e) => setConfig({ ...config, parity: e.target.value })}>{["none", "even", "odd"].map((v) => <option key={v}>{v}</option>)}</select></label>
       <label>Stop bits<select value={config.stop_bits} onChange={(e) => setConfig({ ...config, stop_bits: Number(e.target.value) })}><option>1</option><option>2</option></select></label>
       <label>Flow control<select value={config.flow_control} onChange={(e) => setConfig({ ...config, flow_control: e.target.value })}>{["none", "hardware", "software"].map((v) => <option key={v}>{v}</option>)}</select></label>
+      <label>Enter / pasted line endings<select value={config.lineEnding} onChange={(e) => setConfig({ ...config, lineEnding: e.target.value as ConsoleConfig["lineEnding"] })}><option value="cr">CR</option><option value="lf">LF</option><option value="crlf">CRLF</option></select></label>
+      <label>Backspace sends<select value={config.backspace} onChange={(e) => setConfig({ ...config, backspace: e.target.value as ConsoleConfig["backspace"] })}><option value="del">DEL (127)</option><option value="bs">BS (8)</option></select></label>
+      <label className="check"><input type="checkbox" checked={config.localEcho} onChange={(e) => setConfig({ ...config, localEcho: e.target.checked })} />Local echo (also displays typed passwords)</label>
       <label className="check"><input type="checkbox" checked={config.production} onChange={(e) => setConfig({ ...config, production: e.target.checked })} />Production console: review every Enter</label>
-      <p className="prefs-note">Starts at 9600 / 8N1, no flow control. Match the device’s console settings and cable. Enter sends CR; received bytes render directly.</p>
+      <p className="prefs-note">Starts at 9600 / 8N1, no flow control. Match the device’s console settings and cable. Received bytes render directly.</p>
       {error && <p role="alert">{error}</p>}
       <button disabled={busy || !isTauri()} type="submit">{busy ? "Connecting…" : "Connect console"}</button>
     </form>
