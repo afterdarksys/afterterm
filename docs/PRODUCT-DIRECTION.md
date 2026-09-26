@@ -8,7 +8,7 @@ The current code provides native PTY sessions, tabs, search, xterm rendering, op
 
 The appearance slice adds per-theme terminal and application color overrides, all 16 ANSI colors, cursor and selection colors, editable JSON palette exchange, reset, scrollback tuning, and reduced-motion controls. Desktop preferences persist these overrides; browser previews do not persist preferences or run shells.
 
-Direct serial consoles now have a native I/O path, device discovery, configurable line settings and optional production submission review. Hardware compatibility remains to be qualified.
+Direct serial consoles now have native I/O, device discovery, configurable line settings, production submission review, paced paste, BREAK/modem controls, USB identity reconnect, bounded early boot buffering, and documented Cisco/Juniper/Arista/Fortinet presets. A separate SSH compatibility panel generates per-host overrides based on installed client capabilities. These capabilities still require physical hardware qualification; recordings and remote sharing remain planned.
 
 ## Delivery sequence
 
