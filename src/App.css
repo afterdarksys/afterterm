@@ -283,3 +283,5 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .profile-notes ul { padding-left: 18px; }
 .console-tools { max-height: calc(100dvh - 110px); overflow-y: auto; }
 .console-helper { border-top: 1px solid var(--line); padding-block: 8px; }
+
+.submission-preview { max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }

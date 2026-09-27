@@ -12,9 +12,16 @@ reference only.
 The emulator is a real PTY. k9s, nmap, tcpdump, tshark, vim, tmux, ssh, and
 curses apps have to work — not “work unless you used the AI prompt box.”
 
-AI is a layer, not the floor. No account required to open a shell. Production
-commands (`kubectl delete`, `terraform apply`) hold Enter until you type the
-context name.
+AI is a layer, not the floor. No account required to open a shell. New PTY sessions use **reviewed submissions**: every Enter or multiline input packet is
+held until reviewed. Tab, history and cursor editing cannot silently disable review.
+The dialog shows an unverified explicit target argument when available, otherwise
+`unknown target`; the app never infers the shell’s target from its own environment.
+
+For vim, tmux, k9s and ordinary unrestricted interactive work, choose **Use direct
+terminal** and type `DIRECT`. The status bar then says **review off**. Re-enable
+review explicitly when needed. This is submission review, not a command sandbox
+or proof that a host/account is production. An approved paste may contain several
+commands; review its entire contents. Cancel sends Ctrl+C and discards held bytes.
 
 ## Why this exists
 
@@ -24,7 +31,7 @@ terminal for people who live in packets, clusters, and shells:
 - Standards-compatible PTY (`xterm-256color`, truecolor)
 - Installable on its own — no AfterEdit, no account
 - macOS and Linux from the start
-- Production command bumper
+- Explicit reviewed submissions or direct terminal mode
 - Desktop launches still find Homebrew, mise, cargo, asdf
 
 ## Run
@@ -39,8 +46,26 @@ npm run tauri dev
 
 ```sh
 npm test
+npm run test:integration
 cargo test --workspace
 ```
+
+## Reliability and product direction
+
+PTY output is retained in a bounded 256 KiB history with sequence numbers so a
+late renderer can recover initial output and exit state. Overflow is reported.
+Review requests are bound to their session and request ID; retrying an acknowledged
+request cannot submit a newer one. Shortcut paste respects xterm bracketed paste
+and stays bound to the session selected when the clipboard read started.
+
+See [reliability verification](docs/RELIABILITY-VERIFICATION.md) for test evidence
+and remaining platform qualification. The [enhancement plan](docs/PRODUCT-ENHANCEMENT-PLAN.md)
+sets the proposed direction toward a standalone agentic workbench competing with
+Cursor and Antigravity. Editor and agent-runtime milestones remain planned.
+
+For browser integration tests, install Playwright's Chromium (`npx playwright install chromium`)
+or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chromium executable.
+The tests run the actual React/xterm UI against explicit mocked native IPC.
 
 ## Direct console access
 

@@ -89,6 +89,8 @@ struct Session {
     reader: Option<std::thread::JoinHandle<()>>,
     config: Config,
     pending: Option<Vec<u8>>,
+    generation: u64,
+    settled: u64,
     output: Arc<Mutex<BootBuffer>>,
     transferring: Arc<AtomicBool>,
     cancel_transfer: Arc<AtomicBool>,
@@ -108,8 +110,14 @@ impl Session {
             return Err("Paste at most 64 KiB at a time".into());
         }
         if self.config.production && data.bytes().any(|b| b == b'\r' || b == b'\n') {
+            self.generation += 1;
             self.pending = Some(data.into_bytes());
             return Ok(Some(afterterm_pty::Challenge {
+                request_id: self.generation,
+                input: self
+                    .pending
+                    .as_ref()
+                    .map(|bytes| format!("{:?}", String::from_utf8_lossy(bytes))),
                 action: "Submit console input".into(),
                 expected: self.config.path.clone(),
                 reason: format!(
@@ -123,17 +131,37 @@ impl Session {
             .map_err(|e| e.to_string())?;
         Ok(None)
     }
-    fn confirm(&mut self, typed: Option<String>) -> Result<(), String> {
-        let pending = self.pending.take().ok_or("No pending input")?;
-        if self.stop.load(Ordering::SeqCst) {
-            return Err("Console disconnected".into());
+    fn review(&self) -> Option<afterterm_pty::Challenge> {
+        self.pending.as_ref().map(|_| afterterm_pty::Challenge {
+            request_id: self.generation,
+            input: self
+                .pending
+                .as_ref()
+                .map(|bytes| format!("{:?}", String::from_utf8_lossy(bytes))),
+            action: "Submit console input".into(),
+            expected: self.config.path.clone(),
+            reason: format!("Review held input for console {}", self.config.path),
+        })
+    }
+    fn confirm(&mut self, request_id: u64, typed: Option<String>) -> Result<(), String> {
+        if request_id > 0 && request_id <= self.settled {
+            return Ok(());
         }
-        let bytes = if typed.as_deref() == Some(self.config.path.as_str()) {
-            pending
-        } else {
-            vec![3]
-        };
-        self.port.write_all(&bytes).map_err(|e| e.to_string())
+        if request_id != self.generation || self.pending.is_none() {
+            return Err("Stale console review".into());
+        }
+        if self.stop.load(Ordering::SeqCst) {
+            return Err("Console disconnected; close or reconnect the tab".into());
+        }
+        if typed.is_some() && typed.as_deref() != Some(self.config.path.as_str()) {
+            return Err("Confirmation does not match; input remains held".into());
+        }
+        let pending = self.pending.take().expect("checked");
+        self.settled = request_id;
+        let bytes = if typed.is_some() { pending } else { vec![3] };
+        self.port
+            .write_all(&bytes)
+            .map_err(|e| format!("Submission outcome uncertain; do not resend automatically: {e}"))
     }
 }
 #[derive(Default)]
@@ -206,6 +234,8 @@ pub fn serial_open(app: AppHandle, state: State<Consoles>, config: Config) -> Re
             reader: None,
             config,
             pending: None,
+            generation: 0,
+            settled: 0,
             output: Arc::new(Mutex::new(BootBuffer::default())),
             transferring: Arc::new(AtomicBool::new(false)),
             cancel_transfer: Arc::new(AtomicBool::new(false)),
@@ -336,10 +366,19 @@ pub fn serial_confirm(
     state: State<Consoles>,
     id: u64,
     typed: Option<String>,
+    request_id: u64,
 ) -> Result<(), String> {
     let mut sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
     let session = sessions.get_mut(&id).ok_or("Console is closed")?;
-    session.confirm(typed)
+    session.confirm(request_id, typed)
+}
+#[tauri::command]
+pub fn serial_review(
+    state: State<Consoles>,
+    id: u64,
+) -> Result<Option<afterterm_pty::Challenge>, String> {
+    let sessions = state.0.lock().map_err(|_| "Console state unavailable")?;
+    Ok(sessions.get(&id).ok_or("Console is closed")?.review())
 }
 #[tauri::command]
 pub async fn serial_control(
@@ -586,6 +625,8 @@ mod tests {
             reader: None,
             config,
             pending: None,
+            generation: 0,
+            settled: 0,
             output: Arc::new(Mutex::new(BootBuffer::default())),
             transferring: Arc::new(AtomicBool::new(false)),
             cancel_transfer: Arc::new(AtomicBool::new(false)),
@@ -597,16 +638,36 @@ mod tests {
             "unreviewed bytes must not reach device"
         );
         assert!(session.write("extra".into()).is_err());
-        session.confirm(Some("/dev/test".into())).unwrap();
+        session
+            .confirm(session.generation, Some("/dev/test".into()))
+            .unwrap();
         let n = peer.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], b"show version\r");
         session.write("erase\rreload\r".into()).unwrap();
-        session.confirm(None).unwrap();
+        session.confirm(session.generation, None).unwrap();
         let n = peer.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], &[3]);
-        assert!(session.confirm(Some("/dev/test".into())).is_err());
+        session
+            .confirm(session.generation, Some("/dev/test".into()))
+            .unwrap();
+        assert!(
+            peer.read(&mut buf).is_err(),
+            "duplicate acknowledgement must not write again"
+        );
         session.write("reload\n".into()).unwrap();
-        session.confirm(Some("wrong device".into())).unwrap();
+        assert!(session
+            .confirm(session.generation, Some("wrong device".into()))
+            .is_err());
+        assert!(peer.read(&mut buf).is_err());
+        assert!(session.review().is_some());
+        session
+            .confirm(session.generation - 1, Some("/dev/test".into()))
+            .unwrap();
+        assert!(
+            peer.read(&mut buf).is_err(),
+            "old request must not approve new input"
+        );
+        session.confirm(session.generation, None).unwrap();
         let n = peer.read(&mut buf).unwrap();
         assert_eq!(&buf[..n], &[3]);
         session.config.production = false;

@@ -1,14 +1,8 @@
-//! A confirmation gate in front of destructive commands aimed at production.
-//!
-//! Threats: this protects against a mistake -- the wrong terminal, the wrong
-//! kubeconfig, the wrong window -- not against an attacker, who could run the
-//! command outside this app. It is a speed bump placed exactly where people
-//! actually slip, and it fails closed: an unrecognised shape is not treated as
-//! safe, it is simply not gated, and anything matched is gated until answered.
+//! Heuristic command labels retained for display and task metadata.
+//! These helpers are not authorization. PTY submission review holds every
+//! CR/LF in reviewed mode and does not trust application-environment probes.
 
 use serde::{Deserialize, Serialize};
-
-use crate::context;
 
 /// (program, subcommands that change something).
 ///
@@ -17,8 +11,17 @@ use crate::context;
 const DESTRUCTIVE: &[(&str, &[&str])] = &[
     ("terraform", &["apply", "destroy"]),
     ("tofu", &["apply", "destroy"]),
-    ("kubectl", &["delete", "apply", "replace", "patch", "scale", "drain", "cordon", "uncordon", "taint", "rollout"]),
-    ("oc", &["delete", "apply", "replace", "patch", "scale", "rollout"]),
+    (
+        "kubectl",
+        &[
+            "delete", "apply", "replace", "patch", "scale", "drain", "cordon", "uncordon", "taint",
+            "rollout",
+        ],
+    ),
+    (
+        "oc",
+        &["delete", "apply", "replace", "patch", "scale", "rollout"],
+    ),
     ("helm", &["upgrade", "uninstall", "delete", "rollback"]),
     ("helmfile", &["apply", "destroy", "sync"]),
     ("flux", &["uninstall"]),
@@ -31,13 +34,28 @@ const DESTRUCTIVE: &[(&str, &[&str])] = &[
 /// Subcommand prefixes that are destructive whatever follows, for CLIs whose
 /// verbs are open-ended.
 const DESTRUCTIVE_PREFIXES: &[(&str, &[&str])] = &[
-    ("aws", &["delete-", "terminate-", "remove-", "detach-", "disable-", "put-", "modify-"]),
+    (
+        "aws",
+        &[
+            "delete-",
+            "terminate-",
+            "remove-",
+            "detach-",
+            "disable-",
+            "put-",
+            "modify-",
+        ],
+    ),
     ("gcloud", &["delete", "remove"]),
     ("az", &["delete", "remove", "purge"]),
 ];
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Challenge {
+    #[serde(default)]
+    pub request_id: u64,
+    #[serde(default)]
+    pub input: Option<String>,
     /// What the command would do, for the dialog.
     pub action: String,
     /// The exact string the user has to type.
@@ -101,6 +119,8 @@ pub fn challenge_for(
 
     let verb = destructive_verb(program, args).unwrap_or("");
     Some(Challenge {
+        request_id: 0,
+        input: None,
         action: format!("{} {verb}", program_name(program)),
         expected: expected.to_string(),
         reason: format!("{expected} looks like production"),
@@ -111,12 +131,20 @@ pub fn answered(challenge: &Challenge, typed: Option<&str>) -> bool {
     typed.is_some_and(|value| value.trim() == challenge.expected)
 }
 
-pub fn challenge_for_task(root: Option<&std::path::Path>, command: &str, args: &[String]) -> Option<Challenge> {
+pub fn challenge_for_task(
+    root: Option<&std::path::Path>,
+    command: &str,
+    args: &[String],
+) -> Option<Challenge> {
     if !is_destructive(command, args) {
         return None;
     }
-    let (name, production) = context::target(root);
-    challenge_for(command, args, name.as_deref(), production)
+    // The parent process environment cannot identify this shell's destination.
+    let line = std::iter::once(command.to_string())
+        .chain(args.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    crate::gate::challenge_for_line(root, &line)
 }
 
 #[cfg(test)]
@@ -129,7 +157,10 @@ mod tests {
 
     #[test]
     fn terraform_apply_is_the_reviewed_apply_shape() {
-        assert!(is_infra_apply("terraform", &args("apply -input=false plan.out")));
+        assert!(is_infra_apply(
+            "terraform",
+            &args("apply -input=false plan.out")
+        ));
         assert!(is_infra_apply("/opt/homebrew/bin/tofu", &args("destroy")));
         assert!(!is_infra_apply("terraform", &args("plan -out=plan.out")));
         assert!(!is_infra_apply("kubectl", &args("apply -f deploy.yaml")));
@@ -138,11 +169,17 @@ mod tests {
     #[test]
     fn changing_commands_are_recognised() {
         for line in [
-            "terraform apply", "terraform destroy -auto-approve", "tofu apply",
-            "kubectl delete deployment api", "kubectl apply -f deploy.yaml",
-            "kubectl rollout restart deployment/api", "kubectl drain node-1",
-            "helm upgrade api ./chart", "helm uninstall api",
-            "docker prune", "pulumi destroy",
+            "terraform apply",
+            "terraform destroy -auto-approve",
+            "tofu apply",
+            "kubectl delete deployment api",
+            "kubectl apply -f deploy.yaml",
+            "kubectl rollout restart deployment/api",
+            "kubectl drain node-1",
+            "helm upgrade api ./chart",
+            "helm uninstall api",
+            "docker prune",
+            "pulumi destroy",
         ] {
             let parts = args(line);
             assert!(
@@ -155,10 +192,19 @@ mod tests {
     #[test]
     fn reading_commands_are_left_alone() {
         for line in [
-            "terraform plan", "terraform show", "terraform fmt", "tofu validate",
-            "kubectl get pods", "kubectl describe pod api", "kubectl logs api",
-            "helm list", "helm template ./chart", "docker ps", "git status",
-            "npm test", "make build",
+            "terraform plan",
+            "terraform show",
+            "terraform fmt",
+            "tofu validate",
+            "kubectl get pods",
+            "kubectl describe pod api",
+            "kubectl logs api",
+            "helm list",
+            "helm template ./chart",
+            "docker ps",
+            "git status",
+            "npm test",
+            "make build",
         ] {
             let parts = args(line);
             assert!(
@@ -182,13 +228,29 @@ mod tests {
 
     #[test]
     fn open_ended_clis_match_on_prefix() {
-        for line in ["aws delete-bucket --name x", "aws terminate-instances --ids i-1", "gcloud delete thing", "az purge x"] {
+        for line in [
+            "aws delete-bucket --name x",
+            "aws terminate-instances --ids i-1",
+            "gcloud delete thing",
+            "az purge x",
+        ] {
             let parts = args(line);
-            assert!(is_destructive(&parts[0], &parts[1..]), "{line} should be gated");
+            assert!(
+                is_destructive(&parts[0], &parts[1..]),
+                "{line} should be gated"
+            );
         }
-        for line in ["aws describe-instances", "aws s3 ls", "gcloud list", "az show x"] {
+        for line in [
+            "aws describe-instances",
+            "aws s3 ls",
+            "gcloud list",
+            "az show x",
+        ] {
             let parts = args(line);
-            assert!(!is_destructive(&parts[0], &parts[1..]), "{line} should not be gated");
+            assert!(
+                !is_destructive(&parts[0], &parts[1..]),
+                "{line} should not be gated"
+            );
         }
     }
 
@@ -223,25 +285,36 @@ mod tests {
     #[test]
     fn nothing_is_gated_outside_production() {
         let parts = args("terraform destroy");
-        assert_eq!(challenge_for(&parts[0], &parts[1..], Some("staging"), false), None);
+        assert_eq!(
+            challenge_for(&parts[0], &parts[1..], Some("staging"), false),
+            None
+        );
     }
 
     #[test]
     fn a_read_only_command_is_not_gated_even_in_production() {
         let parts = args("terraform plan");
-        assert_eq!(challenge_for(&parts[0], &parts[1..], Some("acme-prod"), true), None);
+        assert_eq!(
+            challenge_for(&parts[0], &parts[1..], Some("acme-prod"), true),
+            None
+        );
     }
 
     #[test]
     fn without_a_context_name_there_is_nothing_to_type() {
         let parts = args("kubectl delete pod api");
         assert_eq!(challenge_for(&parts[0], &parts[1..], None, true), None);
-        assert_eq!(challenge_for(&parts[0], &parts[1..], Some("   "), true), None);
+        assert_eq!(
+            challenge_for(&parts[0], &parts[1..], Some("   "), true),
+            None
+        );
     }
 
     #[test]
     fn wrong_typed_name_is_not_an_answer() {
         let challenge = Challenge {
+            request_id: 0,
+            input: None,
             action: "kubectl delete".into(),
             expected: "acme-prod".into(),
             reason: "acme-prod looks like production".into(),

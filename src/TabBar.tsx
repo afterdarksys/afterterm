@@ -1,5 +1,6 @@
 import type { ConsoleConfig } from "./console.ts";
 export type Tab = {
+  reviewed?: boolean;
   consoleConfig?: ConsoleConfig;
   transport?: "pty" | "serial";
   key: string;

@@ -1,16 +1,18 @@
 # AfterTerm
 
-Standalone terminal for security engineers, network engineers, and developers.
+Standalone terminal-centered development workbench for security engineers, network engineers, and developers.
 macOS and Linux. Separate product from AfterEdit.
 
-AfterEdit is the agentic IDE (VS Code / Cursor / Windsurf / Antigravity).
-Do not wire the two apps together. AfterEdit’s workbench pane was visual
-reference only.
+The new product objective is a Cursor/Antigravity alternative; follow
+`docs/PRODUCT-ENHANCEMENT-PLAN.md` for staged editor and agent capabilities.
+Keep separate installation from AfterEdit. Do not wire the apps together implicitly.
 
 - Audience lives in kubectl, ssh, tcpdump, nmap, k9s, vim, tmux.
 - Real PTY first. Full-screen tools must work.
 - AI is optional. Shells must work if every AI call errors.
 - No account required to open a prompt.
-- Production gate fails closed: unreviewed Enter is not submitted.
+- Reviewed PTY mode holds every CR/LF input packet; unknown targets remain unknown.
+- Direct terminal mode explicitly disables review; never claim production protection in that mode.
+- Keystroke previews and CLI flags are hints, not authorization or verified target identity.
 - Desktop-launched apps need the augmented developer PATH in `path.rs`.
-- Tests: `npm test` and `cargo test --workspace`.
+- Tests: `npm test`, `npm run test:integration`, `npm run build`, and `cargo test --workspace`.

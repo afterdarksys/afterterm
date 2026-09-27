@@ -1,14 +1,19 @@
 mod prefs;
 mod serial;
 mod ssh;
+use serial::{
+    serial_attach, serial_cancel_paste, serial_close, serial_confirm, serial_control, serial_open,
+    serial_paste, serial_ports, serial_review, serial_write,
+};
 use ssh::ssh_algorithms;
-use serial::{serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close, serial_control, serial_paste, serial_cancel_paste};
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use afterterm_pty::session::{HoldResolution, SessionId, SessionInfo, SessionManager, Sink, SpawnOpts, WriteOutcome};
-use afterterm_pty::{gather, ActiveContext, Challenge};
+use afterterm_pty::session::{
+    HoldResolution, SessionId, SessionInfo, SessionManager, Sink, SpawnOpts, WriteOutcome,
+};
+use afterterm_pty::Challenge;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::Serialize;
@@ -22,6 +27,7 @@ struct AppSink {
 struct OutputEvent {
     id: u64,
     data: String,
+    sequence: u64,
 }
 
 #[derive(Clone, Serialize)]
@@ -37,20 +43,18 @@ struct ChallengeEvent {
 }
 
 impl Sink for AppSink {
-    fn output(&self, id: SessionId, chunk: &[u8]) {
+    fn output(&self, id: SessionId, sequence: u64, chunk: &[u8]) {
         let _ = self.app.emit(
             "pty:output",
             OutputEvent {
                 id: id.0,
                 data: B64.encode(chunk),
+                sequence,
             },
         );
     }
 
     fn exit(&self, id: SessionId, code: u32) {
-        if let Some(handle) = self.app.try_state::<PtyHandle>() {
-            let _ = handle.0.mark_exited(id);
-        }
         let _ = self.app.emit("pty:exit", ExitEvent { id: id.0, code });
     }
 
@@ -72,7 +76,12 @@ fn session_id(id: u64) -> SessionId {
 }
 
 #[tauri::command]
-fn pty_spawn(state: State<PtyHandle>, rows: u16, cols: u16, cwd: Option<String>) -> Result<u64, String> {
+fn pty_spawn(
+    state: State<PtyHandle>,
+    rows: u16,
+    cols: u16,
+    cwd: Option<String>,
+) -> Result<u64, String> {
     let cwd = cwd.map(PathBuf::from);
     let id = state.0.spawn(SpawnOpts {
         rows,
@@ -84,10 +93,14 @@ fn pty_spawn(state: State<PtyHandle>, rows: u16, cols: u16, cwd: Option<String>)
 }
 
 #[tauri::command]
-async fn pty_write(state: State<'_, PtyHandle>, id: u64, data: String) -> Result<(), String> {
+async fn pty_write(
+    state: State<'_, PtyHandle>,
+    id: u64,
+    data: String,
+) -> Result<Option<Challenge>, String> {
     let id = session_id(id);
     match state.0.write(id, &data)? {
-        WriteOutcome::Written => Ok(()),
+        WriteOutcome::Written => Ok(None),
         WriteOutcome::Held { line, generation } => {
             let manager = Arc::clone(&state.0);
             let outcome = tauri::async_runtime::spawn_blocking(move || {
@@ -96,17 +109,23 @@ async fn pty_write(state: State<'_, PtyHandle>, id: u64, data: String) -> Result
             .await
             .map_err(|e| e.to_string())??;
             match outcome {
-                HoldResolution::Released | HoldResolution::Challenge(_) => Ok(()),
+                HoldResolution::Released => Ok(None),
+                HoldResolution::Challenge(challenge) => Ok(Some(challenge)),
             }
         }
     }
 }
 
 #[tauri::command]
-async fn pty_confirm(state: State<'_, PtyHandle>, id: u64, typed: Option<String>) -> Result<(), String> {
+async fn pty_confirm(
+    state: State<'_, PtyHandle>,
+    id: u64,
+    request_id: u64,
+    typed: Option<String>,
+) -> Result<(), String> {
     let id = session_id(id);
     let manager = Arc::clone(&state.0);
-    tauri::async_runtime::spawn_blocking(move || manager.confirm(id, typed.as_deref()))
+    tauri::async_runtime::spawn_blocking(move || manager.confirm(id, request_id, typed.as_deref()))
         .await
         .map_err(|e| e.to_string())??;
     Ok(())
@@ -133,12 +152,26 @@ fn pty_set_title(state: State<PtyHandle>, id: u64, title: String) -> Result<(), 
 }
 
 #[tauri::command]
-fn pty_context(state: State<PtyHandle>, id: Option<u64>) -> Result<ActiveContext, String> {
-    let cwd = match id {
-        Some(id) => Some(state.0.cwd(session_id(id))?),
-        None => None,
-    };
-    Ok(gather(cwd.as_deref()))
+fn pty_attach(
+    state: State<PtyHandle>,
+    id: u64,
+) -> Result<afterterm_pty::session::Snapshot, String> {
+    state.0.snapshot(session_id(id))
+}
+#[tauri::command]
+fn pty_review(state: State<PtyHandle>, id: u64) -> Result<Option<Challenge>, String> {
+    state.0.pending(session_id(id))
+}
+#[tauri::command]
+fn pty_set_reviewed(
+    state: State<PtyHandle>,
+    id: u64,
+    reviewed: bool,
+    typed: Option<String>,
+) -> Result<(), String> {
+    state
+        .0
+        .set_reviewed(session_id(id), reviewed, typed.as_deref())
 }
 
 #[tauri::command]
@@ -173,19 +206,55 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
     let handle = app.handle();
     let new_tab = MenuItem::with_id(handle, "term.new-tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
-    let close_tab = MenuItem::with_id(handle, "term.close-tab", "Close Tab", true, Some("CmdOrCtrl+W"))?;
-    let clear = MenuItem::with_id(handle, "term.clear", "Clear Scrollback", true, Some("CmdOrCtrl+K"))?;
-    let interrupt = MenuItem::with_id(handle, "term.interrupt", "Interrupt", true, Some("Ctrl+Shift+C"))?;
-    let prefs = MenuItem::with_id(handle, "term.prefs", "Preferences…", true, Some("CmdOrCtrl+,"))?;
+    let close_tab = MenuItem::with_id(
+        handle,
+        "term.close-tab",
+        "Close Tab",
+        true,
+        Some("CmdOrCtrl+W"),
+    )?;
+    let clear = MenuItem::with_id(
+        handle,
+        "term.clear",
+        "Clear Scrollback",
+        true,
+        Some("CmdOrCtrl+K"),
+    )?;
+    let interrupt = MenuItem::with_id(
+        handle,
+        "term.interrupt",
+        "Interrupt",
+        true,
+        Some("Ctrl+Shift+C"),
+    )?;
+    let prefs = MenuItem::with_id(
+        handle,
+        "term.prefs",
+        "Preferences…",
+        true,
+        Some("CmdOrCtrl+,"),
+    )?;
     let find = MenuItem::with_id(handle, "term.find", "Find", true, Some("CmdOrCtrl+F"))?;
-    let explain = MenuItem::with_id(handle, "term.explain", "Explain Selection", true, None::<&str>)?;
+    let explain = MenuItem::with_id(
+        handle,
+        "term.explain",
+        "Explain Selection",
+        true,
+        None::<&str>,
+    )?;
 
     let shell = Submenu::with_id_and_items(
         handle,
         "shell",
         "Shell",
         true,
-        &[&new_tab, &close_tab, &PredefinedMenuItem::separator(handle)?, &clear, &interrupt],
+        &[
+            &new_tab,
+            &close_tab,
+            &PredefinedMenuItem::separator(handle)?,
+            &clear,
+            &interrupt,
+        ],
     )?;
     let edit = Submenu::with_id_and_items(
         handle,
@@ -234,7 +303,16 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
-            serial_ports, serial_open, serial_attach, serial_write, serial_confirm, serial_close, serial_control, serial_paste, serial_cancel_paste,
+            serial_ports,
+            serial_open,
+            serial_attach,
+            serial_write,
+            serial_confirm,
+            serial_close,
+            serial_control,
+            serial_paste,
+            serial_cancel_paste,
+            serial_review,
             ssh_algorithms,
             pty_spawn,
             pty_write,
@@ -243,7 +321,9 @@ pub fn run() {
             pty_kill,
             pty_list,
             pty_set_title,
-            pty_context,
+            pty_attach,
+            pty_review,
+            pty_set_reviewed,
             prefs_load,
             prefs_save
         ])
@@ -254,7 +334,9 @@ pub fn run() {
         .expect("error while building AfterTerm")
         .run(|app, event| {
             if let RunEvent::Exit = event {
-                if let Some(consoles) = app.try_state::<serial::Consoles>() { consoles.shutdown(); }
+                if let Some(consoles) = app.try_state::<serial::Consoles>() {
+                    consoles.shutdown();
+                }
                 if let Some(handle) = app.try_state::<PtyHandle>() {
                     handle.0.shutdown();
                 }
@@ -267,12 +349,23 @@ mod registration_tests {
     #[test]
     fn every_command_is_registered() {
         let lib = include_str!("lib.rs");
-        let start = lib.find("generate_handler![").expect("generate_handler! block");
+        let start = lib
+            .find("generate_handler![")
+            .expect("generate_handler! block");
         let end = start + lib[start..].find(']').expect("end of handler list");
         let handler = &lib[start..end];
         for name in [
             "ssh_algorithms",
-            "serial_ports", "serial_open", "serial_attach", "serial_write", "serial_confirm", "serial_close", "serial_control", "serial_paste", "serial_cancel_paste",
+            "serial_ports",
+            "serial_open",
+            "serial_attach",
+            "serial_write",
+            "serial_confirm",
+            "serial_close",
+            "serial_control",
+            "serial_paste",
+            "serial_cancel_paste",
+            "serial_review",
             "pty_spawn",
             "pty_write",
             "pty_confirm",
@@ -280,7 +373,9 @@ mod registration_tests {
             "pty_kill",
             "pty_list",
             "pty_set_title",
-            "pty_context",
+            "pty_attach",
+            "pty_review",
+            "pty_set_reviewed",
             "prefs_load",
             "prefs_save",
         ] {

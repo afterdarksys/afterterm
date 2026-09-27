@@ -1,3 +1,4 @@
+import { OutputReplay, type Snapshot } from "./outputReplay.ts";
 import { consoleInput, type ConsoleConfig } from "./console.ts";
 import { forwardRef, useEffect, useImperativeHandle, useRef } from "react";
 import { invoke } from "@tauri-apps/api/core";
@@ -39,6 +40,7 @@ type Props = {
   consoleConfig?: ConsoleConfig;
   transport?: "pty" | "serial";
   onPaste: (text: string) => void;
+  onAttached: (snapshot: Snapshot) => void;
   onChallenge: (id: number, challenge: Challenge) => void;
   active: boolean;
   prefs: Prefs;
@@ -47,7 +49,7 @@ type Props = {
 };
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, active, prefs, onTitle, onStatus },
+  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, onAttached, active, prefs, onTitle, onStatus },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -68,13 +70,18 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const challengeRef = useRef(onChallenge);
   challengeRef.current = onChallenge;
   const resize = (rows: number, cols: number) => transport === "serial" ? Promise.resolve() : invoke("pty_resize", { id: sessionRef.current, rows, cols });
-  const write = async (data: string) => {
+  const writeQueue = useRef<Promise<void>>(Promise.resolve());
+  const attachedRef = useRef(onAttached); attachedRef.current = onAttached;
+  const write = (data: string) => {
+    writeQueue.current = writeQueue.current.then(async () => {
     try {
       if (consoleConfig) data = consoleInput(data, consoleConfig);
       const challenge = await invoke<Challenge | null>(`${transport}_write`, { id: sessionRef.current, data });
       if (!challenge && consoleConfig?.localEcho) termRef.current?.write(data);
-      if (transport === "serial" && challenge) challengeRef.current(sessionRef.current, challenge);
+      if (challenge) challengeRef.current(sessionRef.current, challenge);
     } catch (error) { onStatusRef.current(`Write failed: ${String(error)}`); }
+    });
+    return writeQueue.current;
   };
 
   useImperativeHandle(ref, () => ({
@@ -85,7 +92,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       if (!term || !fit) return;
       try {
         fit.fit();
-        void resize(term.rows, term.cols);
+        void resize(term.rows, term.cols).catch(() => undefined);
       } catch {
         /* layout not ready */
       }
@@ -93,7 +100,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     clear: () => termRef.current?.clear(),
     copySelection: () => termRef.current?.getSelection() ?? "",
     paste: (text: string) => {
-      if (transport === "serial") pasteRef.current(text); else void write(text);
+      if (!termRef.current) return;
+      if (transport === "serial") pasteRef.current(text); else termRef.current.paste(text);
     },
     findNext: (query: string) => {
       searchRef.current?.findNext(query);
@@ -156,30 +164,46 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       });
     };
 
+    let attached = false;
+    let exitCode: number | null = null;
+    let exitShown = false;
+    const replay = new OutputReplay((data) => term.write(data), (message) => term.writeln(`\r\n[${message}]`));
+    const showExit = () => {
+      if (!attached || exitCode == null || exitShown || disposed) return;
+      exitShown = true;
+      const message = transport === "serial" ? "Console disconnected" : `Shell exited with code ${exitCode}`;
+      onStatusRef.current(message); term.writeln(`\r\n[${message}]`);
+    };
+    const addListener = async <T,>(event: string, handler: (payload: T) => void) => {
+      const off = await listen<T>(event, (event) => { if (!disposed) handler(event.payload); });
+      if (disposed) off(); else listeners.push(off);
+    };
     const connect = async () => {
       try {
-        const [onOutput, onExit] = await Promise.all([
-          listen<{ id: number; data: string }>(`${transport}:output`, (event) => {
-            if (event.payload.id !== sessionRef.current) return;
-            term.write(decodeChunk(event.payload.data));
-          }),
-          listen<{ id: number; code: number }>(`${transport}:exit`, (event) => {
-            if (event.payload.id !== sessionRef.current) return;
-            onStatusRef.current(`${transport === "serial" ? "Console disconnected" : `Shell exited with code ${event.payload.code}`}`);
-            term.writeln(`\r\n\x1b[90m[${transport === "serial" ? "console disconnected" : `shell exited with code ${event.payload.code}`}]\x1b[0m`);
-          }),
-        ]);
-        if (disposed) {
-          onOutput();
-          onExit();
-          return;
+        await addListener<{ id: number; data: string; sequence: number }>(`${transport}:output`, (payload) => {
+          if (payload.id !== sessionId) return;
+          const data = decodeChunk(payload.data);
+          if (transport === "pty") replay.receive({ sequence: payload.sequence, data }); else term.write(data);
+        });
+        if (disposed) return;
+        await addListener<{ id: number; code: number }>(`${transport}:exit`, (payload) => {
+          if (payload.id !== sessionId) return;
+          exitCode = payload.code; showExit();
+        });
+        if (disposed) return;
+        if (transport === "serial") await invoke("serial_attach", { id: sessionId });
+        else {
+          const snapshot = await invoke<Snapshot>("pty_attach", { id: sessionId });
+          if (disposed) return;
+          replay.attach(snapshot);
+          exitCode = snapshot.exit ?? exitCode;
+          attachedRef.current({ ...snapshot, exit: exitCode });
+          if (snapshot.pending) challengeRef.current(sessionId, snapshot.pending);
         }
-        listeners = [onOutput, onExit];
-        if (transport === "serial") await invoke("serial_attach", { id: sessionRef.current });
+        attached = true; showExit();
       } catch (error) {
-        if (!disposed) {
-          onStatusRef.current(`Could not attach terminal: ${String(error)}`);
-        }
+        listeners.forEach((off) => off()); listeners = [];
+        if (!disposed) onStatusRef.current(`Could not attach terminal: ${String(error)}`);
       }
     };
 
@@ -252,7 +276,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     requestAnimationFrame(() => {
       try {
         fit.fit();
-        void resize(term.rows, term.cols);
+        void resize(term.rows, term.cols).catch(() => undefined);
       } catch {
         /* layout */
       }

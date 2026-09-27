@@ -1,10 +1,15 @@
 # AfterTerm — the terminal for the datacenter
 
+Scope update (2026-09-27): [PRODUCT-ENHANCEMENT-PLAN.md](PRODUCT-ENHANCEMENT-PLAN.md)
+is the current staged plan for a standalone agentic workbench. This document
+retains the infrastructure/console design guidance; its delivery sequence is
+superseded by that plan. Editor and agent-runtime work is not implemented yet.
+
 Build a terminal that feels exceptional in daily use and remains dependable during an incident: fast local shells, precise console access, deep customization, and deliberate collaboration. Standalone on macOS and Linux; no account or AI dependency for local work.
 
 ## Baseline and delivered slice
 
-The current code provides native PTY sessions, tabs, search, xterm rendering, optional AI hooks, developer PATH augmentation, and a production Enter gate. These are foundations, not enterprise certification or universal emulation claims.
+The current code provides native PTY sessions, tabs, search, xterm rendering, optional AI hooks, developer PATH augmentation, and explicit reviewed-submission and direct terminal modes. These are foundations, not enterprise certification or universal emulation claims.
 
 The appearance slice adds per-theme terminal and application color overrides, all 16 ANSI colors, cursor and selection colors, editable JSON palette exchange, reset, scrollback tuning, and reduced-motion controls. Desktop preferences persist these overrides; browser previews do not persist preferences or run shells.
 

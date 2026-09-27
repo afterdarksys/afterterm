@@ -17,12 +17,8 @@ import { TabBar, type Tab } from "./TabBar.tsx";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane.tsx";
 import { resolveTheme } from "./themes.ts";
 
-type ContextInfo = {
-  kube_context?: string | null;
-  kube_namespace?: string | null;
-  aws_profile?: string | null;
-  production: boolean;
-};
+type Review = { id: number; challenge: Challenge; transport: "pty" | "serial" };
+const reviewKey = (review: Review) => `${review.transport}:${review.id}:${review.challenge.request_id}`;
 
 let tabSeq = 2;
 
@@ -43,9 +39,15 @@ export default function App() {
   const [findOpen, setFindOpen] = useState(false);
   const [findQuery, setFindQuery] = useState("");
   const [status, setStatus] = useState(isTauri() ? "Starting shell…" : "Desktop app required");
-  const [challenge, setChallenge] = useState<{ id: number; challenge: Challenge; transport?: "pty" | "serial" } | null>(null);
+  const [reviews, setReviews] = useState<Review[]>([]);
+  const challenge = reviews[0] ?? null;
+  const [reviewBusy, setReviewBusy] = useState(false);
+  const [reviewError, setReviewError] = useState("");
+  const confirming = useRef(new Set<string>());
+  const settledReviews = useRef(new Map<string, number>());
+  const [modeRequest, setModeRequest] = useState<{ id: number; key: string } | null>(null);
   const [typed, setTyped] = useState("");
-  const [context, setContext] = useState<ContextInfo | null>(null);
+  const liveTabs = useRef(new Set(["tab-1"]));
   const panes = useRef(new Map<string, TerminalPaneHandle | null>());
   const tabsRef = useRef(tabs);
   tabsRef.current = tabs;
@@ -64,17 +66,17 @@ export default function App() {
     spawning.current.add(key);
     try {
       const id = await invoke<number>("pty_spawn", { rows: 24, cols: 80, cwd: cwd ?? null });
+      if (!liveTabs.current.has(key)) { await invoke("pty_kill", { id }); return; }
       setTabs((current) =>
-        current.map((tab) => (tab.key === key ? { ...tab, sessionId: id, status: "running" } : tab)),
+        current.map((tab) => (tab.key === key ? { ...tab, sessionId: id, status: "starting", reviewed: true } : tab)),
       );
       setStatus("Shell ready");
     } catch (error) {
       setTabs((current) =>
         current.map((tab) => (tab.key === key ? { ...tab, status: "error" } : tab)),
       );
-      spawning.current.delete(key);
       setStatus(`Could not start shell: ${String(error)}`);
-    }
+    } finally { spawning.current.delete(key); }
   }, []);
 
   useEffect(() => {
@@ -89,14 +91,66 @@ export default function App() {
     if (first && first.sessionId === null) void spawnFor(first.key);
   }, [spawnFor]);
 
+  const enqueueReview = (review: Review) => {
+    if (review.challenge.request_id <= (settledReviews.current.get(`${review.transport}:${review.id}`) ?? 0)) return;
+    if (!tabsRef.current.some((tab) => liveTabs.current.has(tab.key) && tab.sessionId === review.id && (tab.transport ?? "pty") === review.transport)) return;
+    setReviews((current) => current.some((item) => reviewKey(item) === reviewKey(review)) ? current : [...current, review]);
+  };
+  const enqueueRef = useRef(enqueueReview); enqueueRef.current = enqueueReview;
+  useEffect(() => { setTyped(""); setReviewError(""); }, [challenge ? reviewKey(challenge) : null, modeRequest?.id]);
+  const finishReview = async (review: Review, answer: string | null) => {
+    const key = reviewKey(review);
+    if (confirming.current.has(key)) return;
+    confirming.current.add(key); setReviewBusy(true); setReviewError("");
+    const remove = () => {
+      const sessionKey = `${review.transport}:${review.id}`;
+      settledReviews.current.set(sessionKey, Math.max(settledReviews.current.get(sessionKey) ?? 0, review.challenge.request_id));
+      setReviews((current) => current.filter((item) => reviewKey(item) !== key));
+    };
+    try {
+      await invoke(`${review.transport}_confirm`, { id: review.id, requestId: review.challenge.request_id, typed: answer });
+      remove();
+    } catch (error) {
+      const message = String(error); setReviewError(message); setStatus(message);
+      try {
+        const pending = await invoke<Challenge | null>(`${review.transport}_review`, { id: review.id });
+        if (!pending || pending.request_id !== review.challenge.request_id) {
+          remove();
+          if (pending) enqueueRef.current({ ...review, challenge: pending });
+        }
+      } catch { setReviewError(`${message}. Could not reconcile the session; retry this request or close the tab.`); }
+    } finally { confirming.current.delete(key); setReviewBusy(false); }
+  };
+  const changeMode = async (id: number, key: string, reviewed: boolean, answer: string | null) => {
+    if (confirming.current.has("mode")) return;
+    confirming.current.add("mode"); setReviewBusy(true); setReviewError("");
+    try {
+      await invoke("pty_set_reviewed", { id, reviewed, typed: answer });
+      setTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed } : tab));
+      setModeRequest(null);
+    } catch (error) {
+      setReviewError(String(error)); setStatus(String(error));
+      try {
+        const snapshot = await invoke<{ reviewed: boolean }>("pty_attach", { id });
+        setTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed: snapshot.reviewed } : tab));
+        if (snapshot.reviewed === reviewed) setModeRequest(null);
+      } catch {
+        setTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed: undefined } : tab));
+        setStatus("Review state unknown; reconnect or close this session before relying on review");
+      }
+    }
+    finally { confirming.current.delete("mode"); setReviewBusy(false); }
+  };
+
   useEffect(() => {
     if (!isTauri()) return;
     const unlisten = Promise.all([
       listen<{ id: number; challenge: Challenge }>("pty:challenge", (event) => {
-        setChallenge(event.payload);
-        setTyped("");
+        enqueueRef.current({ ...event.payload, transport: "pty" });
       }),
       listen<{ id: number; code: number }>("pty:exit", (event) => {
+        setReviews((current) => current.filter((item) => item.transport !== "pty" || item.id !== event.payload.id));
+        setModeRequest((request) => request?.id === event.payload.id ? null : request);
         setTabs((current) =>
           current.map((tab) =>
             tab.transport !== "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab,
@@ -104,6 +158,7 @@ export default function App() {
         );
       }),
       listen<{ id: number; code: number }>("serial:exit", (event) => {
+        setReviews((current) => current.filter((item) => item.transport !== "serial" || item.id !== event.payload.id));
         setTabs((current) => current.map((tab) => tab.transport === "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab));
       }),
       listen<string>("afterterm:menu", (event) => {
@@ -114,14 +169,6 @@ export default function App() {
       void unlisten.then((list) => list.forEach((fn) => fn()));
     };
   }, []);
-
-  useEffect(() => {
-    if (activeTab?.transport === "serial") { setContext(null); return; }
-    if (!isTauri() || !activeTab?.sessionId) return;
-    void invoke<ContextInfo>("pty_context", { id: activeTab.sessionId })
-      .then(setContext)
-      .catch(() => setContext(null));
-  }, [activeTab?.sessionId, activeTab?.transport]);
 
   useEffect(() => {
     document.documentElement.style.setProperty("--ink", theme.chrome.ink);
@@ -141,6 +188,7 @@ export default function App() {
   const connectConsole = async (config: ConsoleConfig) => {
     const id = await invoke<number>("serial_open", { config });
     const tab: Tab = { ...newTab(`${config.path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}`), transport: "serial", consoleConfig: config, sessionId: id, status: "running" };
+    liveTabs.current.add(tab.key);
     setTabs((current) => [...current, tab]);
     setActiveKey(tab.key);
     setStatus("Console connected");
@@ -153,10 +201,13 @@ export default function App() {
     try {
       const ports = await invoke<ConsolePort[]>("serial_ports");
       const path = reconnectPath({ ...tab.consoleConfig, autoReconnect: automatic }, ports);
-      if (tab.sessionId != null) await invoke("serial_close", { id: tab.sessionId });
+      if (tab.sessionId != null) {
+        await invoke("serial_close", { id: tab.sessionId });
+        setReviews((current) => current.filter((item) => item.transport !== "serial" || item.id !== tab.sessionId));
+      }
       const config = { ...tab.consoleConfig, path };
       const id = await invoke<number>("serial_open", { config });
-      if (!tabsRef.current.some((t) => t.key === tab.key)) { await invoke("serial_close", { id }); return; }
+      if (!liveTabs.current.has(tab.key)) { await invoke("serial_close", { id }); return; }
       setTabs((current) => current.map((t) => t.key === tab.key ? { ...t, sessionId: id, consoleConfig: config, status: "running", title: `${path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}` } : t));
       setStatus(`Console reconnected: ${path}`);
     } catch (error) { if (!automatic) setStatus(String(error)); }
@@ -179,18 +230,23 @@ export default function App() {
 
   const addTab = useCallback(() => {
     const tab = newTab();
+    liveTabs.current.add(tab.key);
     setTabs((current) => [...current, tab]);
     setActiveKey(tab.key);
     void spawnFor(tab.key);
   }, [spawnFor]);
 
   const closeTab = useCallback((key: string) => {
+    liveTabs.current.delete(key);
     const current = tabsRef.current;
     const tab = current.find((item) => item.key === key);
     if (tab?.sessionId != null && isTauri()) void invoke(tab.transport === "serial" ? "serial_close" : "pty_kill", { id: tab.sessionId }).catch((error) => setStatus(String(error)));
+    if (tab?.sessionId != null) setReviews((items) => items.filter((item) => item.id !== tab.sessionId || item.transport !== (tab.transport ?? "pty")));
+    setModeRequest((request) => request?.key === key ? null : request);
     const remaining = current.filter((item) => item.key !== key);
     if (remaining.length === 0) {
       const fresh = newTab();
+      liveTabs.current.add(fresh.key);
       setTabs([fresh]);
       setActiveKey(fresh.key);
       void spawnFor(fresh.key);
@@ -229,7 +285,7 @@ export default function App() {
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLElement && event.target.closest(".prefs, .confirm-card, .findbar")) return;
+      if (event.target instanceof HTMLElement && event.target.closest(".prefs, [role=dialog], .findbar, .console-panel, .ssh-panel")) return;
       const action = matchAction(event);
       if (!action) return;
       event.preventDefault();
@@ -248,7 +304,11 @@ export default function App() {
         if (text) void navigator.clipboard.writeText(text);
       }
       if (action === "paste") {
-        void navigator.clipboard.readText().then((text) => activePane()?.paste(text));
+        const destination = tabsRef.current.find((tab) => tab.key === activeRef.current);
+        const pane = activePane();
+        void navigator.clipboard.readText().then((text) => {
+          if (destination && liveTabs.current.has(destination.key) && tabsRef.current.some((tab) => tab.key === destination.key && tab.sessionId === destination.sessionId && tab.status === "running")) pane?.paste(text);
+        }).catch((error) => setStatus(`Clipboard read failed: ${String(error)}`));
       }
       if (action === "interrupt" && activeTab?.sessionId != null) {
         void invoke(`${activeTab.transport ?? "pty"}_write`, { id: activeTab.sessionId, data: "\u0003" }).catch((error) => setStatus(String(error)));
@@ -291,7 +351,8 @@ export default function App() {
               transport={tab.transport}
               consoleConfig={tab.consoleConfig}
               onPaste={(text) => { if (tab.consoleConfig && tab.sessionId != null) setPaste({ id: tab.sessionId, text, config: tab.consoleConfig }); }}
-              onChallenge={(id, next) => { setChallenge({ id, challenge: next, transport: "serial" }); setTyped(""); }}
+              onChallenge={(id, next) => enqueueRef.current({ id, challenge: next, transport: tab.transport ?? "pty" })}
+              onAttached={(snapshot) => setTabs((current) => current.map((item) => item.key === tab.key && item.sessionId === tab.sessionId ? { ...item, reviewed: snapshot.reviewed, status: snapshot.exit != null ? "exited" : "running" } : item))}
               active={tab.key === activeKey}
               prefs={prefs}
               onTitle={(title) => {
@@ -299,7 +360,7 @@ export default function App() {
                 setTabs((current) =>
                   current.map((item) => (item.key === tab.key ? { ...item, title } : item)),
                 );
-                if (tab.sessionId != null) void invoke("pty_set_title", { id: tab.sessionId, title });
+                if (tab.sessionId != null) void invoke("pty_set_title", { id: tab.sessionId, title }).catch(() => undefined);
               }}
               onStatus={setStatus}
             />
@@ -312,9 +373,12 @@ export default function App() {
         <button onClick={() => { setSshOpen(true); setConsoleOpen(false); setPrefsOpen(false); }}>SSH compatibility</button>
         <span>{status}</span>
         <span>
-          {activeTab?.transport === "serial" ? "serial console" : context?.kube_context ? `k8s ${context.kube_context}` : "local"}
-          {context?.production ? " · prod" : ""}
+          {activeTab?.transport === "serial" ? `serial console · review ${activeTab.consoleConfig?.production ? "on" : "off"}` : `target unknown · ${activeTab?.reviewed === false ? "direct terminal — review off" : activeTab?.reviewed === true ? "review every submission" : "review state unknown"}`}
         </span>
+        {activeTab?.transport !== "serial" && activeTab?.sessionId != null && <button disabled={reviewBusy || activeTab.status !== "running"} onClick={() => {
+          if (activeTab.reviewed !== true) void changeMode(activeTab.sessionId!, activeTab.key, true, null);
+          else { setTyped(""); setReviewError(""); setModeRequest({ id: activeTab.sessionId!, key: activeTab.key }); }
+        }}>{activeTab.reviewed !== true ? "Enable submission review" : "Use direct terminal"}</button>}
       </footer>
       {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools profileId={activeTab.consoleConfig?.profileId ?? "generic"} onHelper={(text) => { if (activeTab.consoleConfig && activeTab.sessionId != null) setPaste({ id: activeTab.sessionId, text, config: activeTab.consoleConfig }); }} key={activeTab.sessionId} onReconnect={() => void reconnectConsole(activeTab)} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
       {sshOpen && <SshPanel onClose={() => setSshOpen(false)} />}
@@ -323,23 +387,17 @@ export default function App() {
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />
       )}
       {paste && <ConsolePaste {...paste} onClose={() => setPaste(null)} onStatus={setStatus} />}
-      {challenge && (
-        <ConfirmDialog
-          challenge={challenge.challenge}
-          typed={typed}
-          onTyped={setTyped}
-          onConfirm={() => {
-            void invoke(`${challenge.transport ?? "pty"}_confirm`, { id: challenge.id, typed: typed.trim() }).catch((error) => setStatus(String(error)));
-            setChallenge(null);
-            setTyped("");
-          }}
-          onCancel={() => {
-            void invoke(`${challenge.transport ?? "pty"}_confirm`, { id: challenge.id, typed: null }).catch((error) => setStatus(String(error)));
-            setChallenge(null);
-            setTyped("");
-          }}
-        />
+      {challenge && !modeRequest && (
+        <ConfirmDialog key={reviewKey(challenge)} challenge={challenge.challenge} typed={typed} onTyped={setTyped}
+          busy={reviewBusy} error={reviewError}
+          onConfirm={() => void finishReview(challenge, typed.trim())}
+          onCancel={() => void finishReview(challenge, null)} />
       )}
+      {modeRequest && <ConfirmDialog challenge={{ request_id: 0, action: "Disable submission review?", expected: "DIRECT",
+        reason: "Direct mode passes all input to the terminal, including production commands. Use it for vim, tmux and other interactive tools. AfterTerm will not review submissions in this session" }}
+        typed={typed} onTyped={setTyped} busy={reviewBusy} error={reviewError}
+        onConfirm={() => void changeMode(modeRequest.id, modeRequest.key, false, typed)} onCancel={() => setModeRequest(null)} />}
+
     </div>
   );
 }
