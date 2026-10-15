@@ -34,6 +34,8 @@ export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
   const [paste, setPaste] = useState<{ id: number; text: string; config: ConsoleConfig } | null>(null);
   const [sshOpen, setSshOpen] = useState(false);
+  const [sahOpen, setSahOpen] = useState(false);
+  const [sahHost, setSahHost] = useState("");
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
   const [findOpen, setFindOpen] = useState(false);
@@ -61,16 +63,17 @@ export default function App() {
   const theme = resolveTheme(prefs.theme, prefs.themeOverrides[prefs.theme]);
 
   const spawning = useRef(new Set<string>());
-  const spawnFor = useCallback(async (key: string, cwd?: string) => {
+  const spawnFor = useCallback(async (key: string, cwd?: string, sahArgs?: string[]) => {
     if (!isTauri() || spawning.current.has(key)) return;
     spawning.current.add(key);
     try {
-      const id = await invoke<number>("pty_spawn", { rows: 24, cols: 80, cwd: cwd ?? null });
+      const args = sahArgs ?? (key === "tab-1" ? await invoke<string[]>("launch_args") : []);
+      const id = await invoke<number>("pty_spawn", { rows: 24, cols: 80, cwd: cwd ?? null, sahArgs: args });
       if (!liveTabs.current.has(key)) { await invoke("pty_kill", { id }); return; }
       setTabs((current) =>
-        current.map((tab) => (tab.key === key ? { ...tab, sessionId: id, status: "starting", reviewed: true } : tab)),
+        current.map((tab) => (tab.key === key ? { ...tab, title: args.length ? "SAH" : tab.title, sessionId: id, status: "starting", reviewed: true } : tab)),
       );
-      setStatus("Shell ready");
+      setStatus(args.length ? "SAH client started; remote target identity is not verified by AfterTerm" : "Shell ready");
     } catch (error) {
       setTabs((current) =>
         current.map((tab) => (tab.key === key ? { ...tab, status: "error" } : tab)),
@@ -369,6 +372,7 @@ export default function App() {
       </main>
       <footer className="status">
         <button onClick={() => { setConsoleOpen(true); setPrefsOpen(false); setSshOpen(false); }}>Connect console</button>
+        <button onClick={() => setSahOpen(!sahOpen)}>Connect SAH</button>
         <button onClick={() => { setPrefsOpen(true); setConsoleOpen(false); setSshOpen(false); }}>Appearance</button>
         <button onClick={() => { setSshOpen(true); setConsoleOpen(false); setPrefsOpen(false); }}>SSH compatibility</button>
         <span>{status}</span>
@@ -382,6 +386,21 @@ export default function App() {
       </footer>
       {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools profileId={activeTab.consoleConfig?.profileId ?? "generic"} onHelper={(text) => { if (activeTab.consoleConfig && activeTab.sessionId != null) setPaste({ id: activeTab.sessionId, text, config: activeTab.consoleConfig }); }} key={activeTab.sessionId} onReconnect={() => void reconnectConsole(activeTab)} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
       {sshOpen && <SshPanel onClose={() => setSshOpen(false)} />}
+      {sahOpen && <aside className="prefs" aria-label="SAH connection">
+        <header><h2>Connect SAH</h2><button onClick={() => setSahOpen(false)} aria-label="Close SAH connection">×</button></header>
+        <p className="prefs-note">Uses the installed sahconnect client and its server configuration. Input starts in reviewed mode; AfterTerm does not verify the remote target identity.</p>
+        <label>Host name or host ID<input value={sahHost} onChange={(event) => setSahHost(event.target.value)} /></label>
+        <button disabled={!/^[A-Za-z0-9._-]{1,253}$/.test(sahHost)} onClick={() => {
+          const tab = newTab("SAH"); liveTabs.current.add(tab.key);
+          setTabs((current) => [...current, tab]); setActiveKey(tab.key);
+          void spawnFor(tab.key, undefined, ["connect", sahHost]); setSahOpen(false);
+        }}>Connect</button>
+        <button onClick={() => {
+          const tab = newTab("SAH login"); liveTabs.current.add(tab.key);
+          setTabs((current) => [...current, tab]); setActiveKey(tab.key);
+          void spawnFor(tab.key, undefined, ["login"]); setSahOpen(false);
+        }}>Sign in to SAH</button>
+      </aside>}
       {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)} />}
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} />

@@ -67,6 +67,60 @@ For browser integration tests, install Playwright's Chromium (`npx playwright in
 or set `PLAYWRIGHT_CHROMIUM_EXECUTABLE` to an installed Chromium executable.
 The tests run the actual React/xterm UI against explicit mocked native IPC.
 
+## Launch modes and SAH
+
+The current GUI terminal type is xterm-compatible (xterm.js), with
+`TERM=xterm-256color` and `COLORTERM=truecolor` in local PTYs. Serial tabs use the
+same renderer. There is no terminal-type selector or separately qualified
+VT100/VT220, Linux-console, ANSI/BBS, TN3270 or TN5250 emulator. Console launch
+mode uses the invoking terminal's renderer and inherits its `TERM`.
+
+AfterTerm uses the existing Go `sahconnect` executable for SAH connections.
+Install it separately on your developer PATH; protocol, TLS, authentication,
+remote resize and remote exit handling remain owned by that client. Local shells
+do not require SAH, an account, or AI. AfterEdit remains a separate installation.
+
+```sh
+afterterm gui                       # desktop with a local shell
+afterterm console                   # local shell in the current terminal
+afterterm gui connect web1          # SAH client in a desktop PTY tab
+afterterm console connect web1      # SAH client in the current terminal
+afterterm console login             # SAH device login
+afterterm gui connect web1 --root    # forwarded to sahconnect; requires its authorization
+afterterm --help
+```
+
+The desktop **Connect SAH** panel provides host connection and device login.
+It uses `sahconnect`'s existing server configuration and credential store;
+AfterTerm does not copy tokens into its preferences. Each new ordinary tab still
+opens a local shell. Connection arguments are passed literally, without shell
+interpolation. Use `--` after the mode to forward client help, e.g.
+`afterterm console -- --help`.
+
+Set `$XDG_CONFIG_HOME/afterterm/launch.json` (default
+`~/.config/afterterm/launch.json`) to:
+
+```json
+{ "default_mode": "gui" }
+```
+
+Choose `"console"` for a TTY default. Explicit `gui` or `console` wins over the
+configured mode; without either, arguments go to the configured interface.
+With no arguments, it opens a local shell. `AFTERTERM_CONFIG` selects another
+config file, which must exist. Missing default files use GUI; malformed files,
+unknown settings, and invalid modes report an error. This launcher file is
+separate from desktop appearance preferences and SAH's own config.
+
+GUI sessions start reviewed: every CR/LF input packet is held for review.
+For full-screen tools, explicitly switch the tab to Direct mode using the
+existing confirmation. Console mode is direct, with no AfterTerm input review;
+it preserves the client's controlling TTY, signals, pipes and exit status.
+AfterTerm does not infer verified remote target identity from a host argument
+or client output. SAH server policy and authorization remain the client's and
+server's responsibility. This is a CLI-backed integration, not a Rust protocol
+implementation or a bundled SAH installation. Console mode currently uses the
+same desktop-linked binary, not a separate minimal server package.
+
 ## Direct console access
 
 Use **Connect console** in the desktop app to select a detected serial device

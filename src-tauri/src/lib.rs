@@ -1,3 +1,4 @@
+mod launch;
 mod prefs;
 mod serial;
 mod ssh;
@@ -70,6 +71,12 @@ impl Sink for AppSink {
 }
 
 pub struct PtyHandle(pub Arc<SessionManager>);
+struct LaunchArgs(Vec<String>);
+
+#[tauri::command]
+fn launch_args(state: State<LaunchArgs>) -> Vec<String> {
+    state.0.clone()
+}
 
 fn session_id(id: u64) -> SessionId {
     SessionId(id)
@@ -81,14 +88,24 @@ fn pty_spawn(
     rows: u16,
     cols: u16,
     cwd: Option<String>,
+    sah_args: Option<Vec<String>>,
 ) -> Result<u64, String> {
     let cwd = cwd.map(PathBuf::from);
-    let id = state.0.spawn(SpawnOpts {
-        rows,
-        cols,
-        cwd,
-        program: None,
-    })?;
+    let args = sah_args.unwrap_or_default();
+    let program = if args.is_empty() {
+        None
+    } else {
+        Some(
+            launch::sah_binary()?
+                .to_str()
+                .ok_or("SAH client path is not UTF-8")?
+                .to_owned(),
+        )
+    };
+    let id = state.0.spawn_with_args(
+        SpawnOpts { rows, cols, cwd, program },
+        &args,
+    )?;
     Ok(id.0)
 }
 
@@ -290,7 +307,32 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    run_gui(vec![])
+}
+
+pub fn launch_cli() -> Result<(), String> {
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    if args.first().is_some_and(|s| s == "--help" || s == "-h") {
+        print!("{}", launch::HELP);
+        return Ok(());
+    }
+    let (mode, args) = launch::select(args, launch::load_config()?.default_mode);
+    if mode == launch::Mode::Console {
+        #[cfg(unix)]
+        return launch::console(args);
+        #[cfg(not(unix))]
+        return Err("Console mode requires macOS or Linux".into());
+    }
+    let args = args.into_iter()
+        .map(|s| s.into_string().map_err(|_| "GUI arguments must be UTF-8".to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    run_gui(args);
+    Ok(())
+}
+
+fn run_gui(args: Vec<String>) {
     tauri::Builder::default()
+        .manage(LaunchArgs(args))
         .setup(|app| {
             let sink = Arc::new(AppSink {
                 app: app.handle().clone(),
@@ -303,6 +345,7 @@ pub fn run() {
         })
         .plugin(tauri_plugin_opener::init())
         .invoke_handler(tauri::generate_handler![
+            launch_args,
             serial_ports,
             serial_open,
             serial_attach,
@@ -355,6 +398,7 @@ mod registration_tests {
         let end = start + lib[start..].find(']').expect("end of handler list");
         let handler = &lib[start..end];
         for name in [
+            "launch_args",
             "ssh_algorithms",
             "serial_ports",
             "serial_open",

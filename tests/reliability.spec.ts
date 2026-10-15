@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?: boolean } = {}) {
+async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?: boolean; launchArgs?: string[] } = {}) {
   await page.addInitScript((options) => {
     const w = window as any;
     const callbacks = new Map<number, Function>();
@@ -26,6 +26,7 @@ async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?
       invoke:async(command:string,args:any = {}) => {
         w.calls.push({command,args});
         switch(command) {
+          case 'launch_args': return options.launchArgs ?? [];
           case 'plugin:event|listen': {const id=next++;listeners.set(id,args);return id;}
           case 'plugin:event|unlisten': return;
           case 'prefs_load': return {theme:'signal',font_family:'monospace',font_size:13,transparency:1,cursor_style:'bar',scrollback:10000,reduced_motion:true,ai_enabled:false};
@@ -66,6 +67,29 @@ async function ready(page: Page) {
 }
 const calls = (page:Page, command:string) => page.evaluate(command => (window as any).calls.filter((call:any) => call.command === command), command);
 const mod = process.platform === 'darwin' ? 'Meta' : 'Control';
+
+test('SAH launch arguments apply only to the initial tab', async ({page}) => {
+  await harness(page, {launchArgs: ['connect', 'web1', '--root']}); await ready(page);
+  expect((await calls(page, 'pty_spawn'))[0].args.sahArgs).toEqual(['connect', 'web1', '--root']);
+  await page.getByRole('button', {name:'New tab', exact:true}).click();
+  await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(2);
+  expect((await calls(page, 'pty_spawn'))[1].args.sahArgs).toEqual([]);
+});
+
+test('SAH panel connects with literal host arguments and supports login', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.getByRole('button', {name:'Connect SAH', exact:true}).click();
+  await page.getByLabel('Host name or host ID').fill('web1; echo nope');
+  await expect(page.getByRole('button', {name:'Connect', exact:true})).toBeDisabled();
+  await page.getByLabel('Host name or host ID').fill('web1');
+  await page.getByRole('button', {name:'Connect', exact:true}).click();
+  await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(2);
+  expect((await calls(page, 'pty_spawn'))[1].args.sahArgs).toEqual(['connect','web1']);
+  await page.getByRole('button', {name:'Connect SAH', exact:true}).click();
+  await page.getByRole('button', {name:'Sign in to SAH', exact:true}).click();
+  await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(3);
+  expect((await calls(page, 'pty_spawn'))[2].args.sahArgs).toEqual(['login']);
+});
 
 test('closing a starting tab kills its late session without killing the replacement', async ({page}) => {
   await harness(page,{delaySpawn:true});

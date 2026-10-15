@@ -181,6 +181,11 @@ impl SessionManager {
             .ok_or("no such pty session".into())
     }
     pub fn spawn(&self, opts: SpawnOpts) -> Result<SessionId, String> {
+        self.spawn_with_args(opts, &[])
+    }
+
+    /// Spawn an executable with literal argv; never interpret arguments as shell text.
+    pub fn spawn_with_args(&self, opts: SpawnOpts, args: &[String]) -> Result<SessionId, String> {
         let cwd = opts.cwd.unwrap_or_else(|| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
@@ -199,6 +204,7 @@ impl SessionManager {
             Some(program) => CommandBuilder::new(program),
             None => CommandBuilder::new_default_prog(),
         };
+        cmd.args(args);
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("PATH", augmented_path());
@@ -611,6 +617,23 @@ mod tests {
             })
             .unwrap_err();
         assert!(err.contains("working directory"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn child_arguments_are_literal_and_output_is_retained() {
+        let collect = Arc::new(Collect {
+            output: Mutex::new(Vec::new()),
+            exits: Mutex::new(Vec::new()),
+        });
+        let manager = SessionManager::new(collect.clone());
+        let id = manager.spawn_with_args(SpawnOpts {
+            rows: 24, cols: 80, cwd: Some(PathBuf::from("/")),
+            program: Some("/usr/bin/printf".into()),
+        }, &["%s".into(), "literal;$(echo expanded) with spaces".into()]).unwrap();
+        assert!(wait_for(&collect, b"literal;$(echo expanded) with spaces", Duration::from_secs(3)));
+        assert!(manager.snapshot(id).unwrap().reviewed);
+        manager.shutdown();
     }
 
     #[cfg(unix)]
