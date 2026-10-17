@@ -17,7 +17,7 @@ import { ConsolePaste } from "./ConsolePaste.tsx";
 import { ConsoleTools } from "./ConsoleTools.tsx";
 import { ConsolePanel, type ConsoleConfig } from "./ConsolePanel.tsx";
 import { PrefsPanel } from "./PrefsPanel.tsx";
-import { TabBar, type Tab } from "./TabBar.tsx";
+import { panelId, TabBar, tabId, type Tab } from "./TabBar.tsx";
 import { TerminalPane, type TerminalPaneHandle } from "./TerminalPane.tsx";
 import { resolveTheme } from "./themes.ts";
 
@@ -273,6 +273,7 @@ export default function App() {
     if (tab?.sessionId != null && isTauri()) void invoke(tab.transport === "serial" ? "serial_close" : "pty_kill", { id: tab.sessionId }).catch((error) => setStatus(String(error)));
     if (tab?.sessionId != null) setReviews((items) => items.filter((item) => item.id !== tab.sessionId || item.transport !== (tab.transport ?? "pty")));
     setModeRequest((request) => request?.key === key ? null : request);
+    if (tab) setStatus(`Closed ${tab.title}`);
     const remaining = current.filter((item) => item.key !== key);
     if (remaining.length === 0) {
       const fresh = newTab();
@@ -358,10 +359,24 @@ export default function App() {
       setStatus(`${action === "cut" && !field.readOnly ? "Cut" : "Copied"} ${end - start} characters`);
     }
     if (action === "paste" && !field.readOnly) {
-      const text = await readClipboard();
-      field.setRangeText(text, start, end, "end");
-      field.dispatchEvent(new Event("input", { bubbles: true }));
-      setStatus(`Pasted ${text.length} characters`);
+      const clipboard = await readClipboard();
+      // Honor maxLength the way typing does: keep only what fits in place of the selection.
+      const room = field.maxLength >= 0 ? Math.max(0, field.maxLength - (field.value.length - (end - start))) : Infinity;
+      const text = clipboard.slice(0, room);
+      // insertText goes through the browser's editing path, so native undo still works.
+      // Fall back to setRangeText when the command is unavailable or focus has moved.
+      let inserted = false;
+      if (document.activeElement === field && typeof document.execCommand === "function") {
+        field.setSelectionRange(start, end);
+        inserted = text === "" || document.execCommand("insertText", false, text);
+      }
+      if (!inserted) {
+        field.setRangeText(text, start, end, "end");
+        field.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      setStatus(text.length < clipboard.length
+        ? `Pasted ${text.length} of ${clipboard.length} characters; this field holds at most ${field.maxLength}`
+        : `Pasted ${text.length} characters`);
     }
   };
 
@@ -583,7 +598,10 @@ export default function App() {
       <TabBar
         tabs={tabs}
         activeKey={activeKey}
-        onSelect={setActiveKey}
+        onSelect={(key) => {
+          // Choosing the tab that is already open still moves focus to its terminal.
+          if (key === activeRef.current) panes.current.get(key)?.focus(); else setActiveKey(key);
+        }}
         onClose={closeTab}
         onNew={addTab}
       />
@@ -608,6 +626,8 @@ export default function App() {
                 panes.current.set(tab.key, handle);
               }}
               sessionId={tab.sessionId}
+              panelId={panelId(tab.key)}
+              tabId={tabId(tab.key)}
               transport={tab.transport}
               consoleConfig={tab.consoleConfig}
               onPaste={(text) => { if (tab.consoleConfig && tab.sessionId != null) setPaste({ id: tab.sessionId, text, config: tab.consoleConfig }); }}

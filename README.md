@@ -56,7 +56,9 @@ cargo test --workspace
 ## Menus, keyboard and VoiceOver
 
 Every command is in the macOS menu bar with a keyboard shortcut, and the same
-shortcut works inside the window. Mod means Command on macOS and Control on Linux.
+shortcut works inside the window. The shortcuts below are the macOS ones; Mod
+means Command. Linux shortcuts are listed in their own section further down,
+because Control plus a letter belongs to the shell there.
 Panels move keyboard focus to their heading or first control when they open,
 close with Escape, and return focus to the terminal. Results such as "Copied 42
 characters" or "Theme Nocturne applied" are announced through the status line,
@@ -91,8 +93,9 @@ Copy uses the system clipboard directly. Terminal output cannot be deleted, so
 Cut copies the selection and then clears it, and says so. Paste goes through the
 same path as typing: bracketed paste is honored and, when submission review is on
 for the tab, the Enter is held for approval. In a text field inside a panel these
-commands act on that field instead of the terminal. Copy on select is an option
-in Preferences and is off by default.
+commands act on that field instead of the terminal; paste there respects the
+field's length limit (and says how much was cut off) and can be undone. Copy on
+select is an option in Preferences and is off by default.
 
 Shell menu:
 - Clear Scrollback (Mod+K).
@@ -120,6 +123,50 @@ View menu: Session Info (Mod+I); Bigger Text (Mod+Equals), Smaller Text
 
 Window menu: Minimize, Zoom, Next Tab (Mod+Shift+Right Bracket), Previous Tab
 (Mod+Shift+Left Bracket).
+
+### Tabs
+
+The tab bar is a tab list named Terminal sessions. Each tab is a tab button
+followed by its own Close button, named Close and the tab's title, so the close
+control is not read as part of the tab's name. A tab that is starting, has
+exited or failed to start says so after its title.
+
+Only the selected tab is in the Tab order, and its Close button comes right
+after it. With focus on a tab: Left and Right Arrow move to the previous or next
+tab (wrapping around), Home and End move to the first and last tab, Enter or
+Space opens the focused tab and moves focus to its terminal, and Delete or
+Backspace closes the focused tab. Closing the selected tab moves focus to the
+terminal of the tab that takes its place; closing another tab keeps focus in the
+tab list. The status line announces "Closed" and the tab's title. Close Tab
+(Mod+W) still closes the selected tab from anywhere.
+
+### Keyboard shortcuts on Linux
+
+Untested on Linux so far. On Linux, Control plus a letter is the shell's
+(Control-C interrupts, Control-A and Control-E move along the line, Control-W
+deletes a word), and the menu bar may act on a shortcut before the terminal sees
+it. So AfterTerm uses Control+Shift for letter shortcuts, as other Linux
+terminals do, and adds Alt where that would collide. Control-C always goes to
+the shell.
+
+- New Tab Control+Shift+T, Close Tab Control+Shift+W.
+- Save Transcript Control+Shift+S, Save Selection Control+Shift+Alt+S, Export
+  Transcript as HTML Control+Shift+Alt+H, Log Session Control+Shift+L, Print
+  Control+Shift+P.
+- Cut Control+Shift+X, Copy Control+Shift+C, Paste Control+Shift+V, Select All
+  Control+Shift+A, Clear Selection Control+Shift+Alt+A, Find Control+Shift+F,
+  Explain Selection Control+Shift+E.
+- Clear Scrollback Control+Shift+K, Reset Terminal Control+Shift+Alt+R, Send
+  Control-C Control+Shift+Alt+C (plain Control-C does the same in the terminal),
+  Toggle Submission Review Control+Shift+R, Connect SAH Control+Shift+H, Connect
+  Serial Console Control+Shift+O, SSH Compatibility Control+Shift+Alt+K.
+- Session Info Control+Shift+I, Preferences Control+Comma, Bigger Text
+  Control+Equals, Smaller Text Control+Minus, Default Text Size Control+0, Next
+  Tab Control+Shift+Right Bracket, Previous Tab Control+Shift+Left Bracket.
+
+When the terminal has focus, a key that is an AfterTerm shortcut goes only to
+AfterTerm and never also to the session, so Send Control-C sends exactly one
+Control-C.
 
 ### Session Info panel
 

@@ -57,7 +57,7 @@ body {
   overflow-x: auto;
 }
 
-.tab, .tab-new {
+.tab-new, .tab-select, .tab-close {
   appearance: none;
   border: 0;
   background: transparent;
@@ -70,10 +70,18 @@ body {
 .tab {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 2px;
   max-width: 180px;
-  padding: 8px 10px 10px;
+  padding: 0 4px 0 0;
   border-radius: 8px 8px 0 0;
+  color: var(--muted);
+}
+
+.tab-select {
+  min-width: 0;
+  padding: 8px 4px 10px 10px;
+  color: inherit;
+  border-radius: 8px 0 0 0;
 }
 
 .tab.is-active {
@@ -85,17 +93,35 @@ body {
 .tab.is-exited { opacity: 0.55; font-style: italic; }
 
 .tab-title {
+  display: block;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .tab-close {
+  padding: 4px 6px;
+  border-radius: 5px;
+  color: inherit;
   font-size: 14px;
   opacity: 0.5;
 }
 
-.tab-close:hover { opacity: 1; color: var(--danger); }
+.tab-close:hover, .tab-close:focus-visible { opacity: 1; color: var(--danger); }
+
+.tab-select:focus-visible, .tab-close:focus-visible, .tab-new:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
 
 .tab-new {
   width: 28px;

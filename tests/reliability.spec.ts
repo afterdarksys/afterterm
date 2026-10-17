@@ -1,8 +1,10 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?: boolean; launchArgs?: string[]; direct?: boolean; prefsFail?: boolean } = {}) {
+async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?: boolean; launchArgs?: string[]; direct?: boolean; prefsFail?: boolean; platform?: string } = {}) {
   await page.addInitScript((options) => {
     const w = window as any;
+    // Both the app and xterm read navigator.platform when they load.
+    if (options.platform) Object.defineProperty(navigator, 'platform', {value:options.platform});
     const callbacks = new Map<number, Function>();
     const listeners = new Map<number, {event:string;handler:number}>();
     let next = 1, session = 0;
@@ -359,4 +361,88 @@ test('a session log that stops on its own is announced', async ({page}) => {
   await menu(page, 'view.session-info');
   await expect(status(page)).toContainText('Session log stopped: the log file could not keep up');
   await expect(page.getByRole('checkbox', {name:'Log session output to a file'})).not.toBeChecked();
+});
+
+test('tabs are a keyboard tab list with separate, labelled close buttons', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.getByRole('button', {name:'New tab', exact:true}).click();
+  await page.getByRole('button', {name:'New tab', exact:true}).click();
+  const tabs = page.getByRole('tablist', {name:'Terminal sessions'}).getByRole('tab');
+  await expect(tabs).toHaveCount(3);
+  await expect.poll(async()=>(await calls(page,'pty_attach')).length).toBe(3);
+  // The close control is its own button, not part of the tab's name.
+  await expect(tabs.nth(2)).toHaveAccessibleName(/^shell/);
+  await expect(tabs.nth(2)).not.toHaveAccessibleName(/Close|×/);
+  await expect(tabs.nth(2)).toHaveAttribute('aria-selected', 'true');
+  await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'false');
+  const controls = await tabs.nth(2).getAttribute('aria-controls');
+  await expect(page.locator(`#${controls}`)).toHaveAttribute('role', 'tabpanel');
+  await expect(page.locator(`#${controls}`)).toHaveClass(/is-active/);
+  // Only the selected tab is in the Tab order, and its Close button comes next.
+  await expect(tabs.nth(2)).toHaveAttribute('tabindex', '0');
+  await expect(tabs.nth(0)).toHaveAttribute('tabindex', '-1');
+  await tabs.nth(2).focus();
+  await page.keyboard.press('Tab');
+  await expect(page.getByRole('button', {name:'Close shell'}).nth(2)).toBeFocused();
+  // Arrow keys move focus between tabs (wrapping); Enter opens the focused tab.
+  await tabs.nth(2).focus();
+  await page.keyboard.press('ArrowRight');
+  await expect(tabs.nth(0)).toBeFocused();
+  await page.keyboard.press('ArrowLeft');
+  await expect(tabs.nth(2)).toBeFocused();
+  await page.keyboard.press('Home');
+  await expect(tabs.nth(0)).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(tabs.nth(0)).toHaveAttribute('aria-selected', 'true');
+  await expect(page.locator('.term-host.is-active .xterm-helper-textarea')).toBeFocused();
+  // Delete on a tab that is not selected closes it and keeps focus in the tab list.
+  await tabs.nth(0).focus();
+  await page.keyboard.press('End');
+  await page.keyboard.press('Delete');
+  await expect(tabs).toHaveCount(2);
+  await expect.poll(async()=>(await calls(page,'pty_kill')).map((x:any)=>x.args.id)).toEqual([3]);
+  await expect(tabs.nth(1)).toBeFocused();
+  await expect(status(page)).toContainText('Closed shell');
+  // Command+W (Control+Shift+W elsewhere) still closes the selected tab.
+  await page.locator('.term-host.is-active .xterm-helper-textarea').focus();
+  await page.keyboard.press(process.platform === 'darwin' ? 'Meta+KeyW' : 'Control+Shift+KeyW');
+  await expect(tabs).toHaveCount(1);
+});
+
+for (const platform of [undefined, 'Linux x86_64']) {
+  test(`Send Control-C delivers exactly one Control-C from the keyboard and its menu echo (${platform ?? 'this platform'})`, async ({page}) => {
+    await harness(page, {platform}); await ready(page);
+    const linux = platform !== undefined || process.platform !== 'darwin';
+    const writes = async () => (await calls(page,'pty_write')).map((x:any)=>x.args.data);
+    await page.locator('.term-host.is-active .xterm-helper-textarea').focus();
+    // Off macOS the chord is Control+Shift+Alt+C, which xterm would otherwise turn into ESC ^C.
+    await page.keyboard.press(linux ? 'Control+Shift+Alt+KeyC' : 'Control+Shift+KeyC');
+    await menu(page, 'shell.interrupt');
+    await ready(page);
+    await expect.poll(writes).toEqual(['\x03']);
+    await page.waitForTimeout(200);
+    expect(await writes()).toEqual(['\x03']);
+    // A plain Control-C is the shell's: xterm sends it once and the app does not add another.
+    await page.keyboard.press('Control+KeyC');
+    await expect.poll(writes).toEqual(['\x03', '\x03']);
+    await page.waitForTimeout(200);
+    expect(await writes()).toEqual(['\x03', '\x03']);
+  });
+}
+
+test('paste into a text field honors maxLength and can be undone', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.getByRole('button', {name:'Connect SAH', exact:true}).click();
+  const field = page.getByLabel('Host name or host ID');
+  await field.fill('web');
+  await field.evaluate((input: HTMLInputElement) => { input.maxLength = 6; input.setSelectionRange(3, 3); });
+  await menu(page, 'edit.paste');
+  await expect.poll(()=>page.evaluate(()=>typeof (window as any).resolveClipboard)).toBe('function');
+  await page.evaluate(()=>(window as any).resolveClipboard('123456789'));
+  await expect(field).toHaveValue('web123');
+  await expect(status(page)).toContainText('Pasted 3 of 9 characters');
+  await expect(page.getByRole('button', {name:'Connect', exact:true})).toBeEnabled();
+  await page.evaluate(() => document.execCommand('undo'));
+  await expect(field).toHaveValue('web');
+  expect((await calls(page,'pty_write')).some((x:any)=>x.args.data.includes('123'))).toBe(false);
 });

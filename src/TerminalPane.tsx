@@ -14,6 +14,7 @@ import type { Prefs } from "./prefs.ts";
 import { resolveTheme, withAlpha } from "./themes.ts";
 import { writeClipboard } from "./clipboard.ts";
 import { linesToText } from "./transcript.ts";
+import { terminalHandlesKey } from "./keybindings.ts";
 
 const MAX_LAYOUT_FRAMES = 60;
 
@@ -90,10 +91,13 @@ type Props = {
   prefs: Prefs;
   onTitle: (title: string) => void;
   onStatus: (message: string) => void;
+  /** Tab panel id and the id of the tab that labels it. */
+  panelId?: string;
+  tabId?: string;
 };
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, onAttached, active, prefs, onTitle, onStatus },
+  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, onAttached, active, prefs, onTitle, onStatus, panelId, tabId },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -295,6 +299,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     };
     frame = requestAnimationFrame(startWhenLaidOut);
 
+    // Keys bound to an app action go to the app handler only; see terminalHandlesKey.
+    term.attachCustomKeyEventHandler((event) => terminalHandlesKey(event));
     const input = term.onData((data) => {
       void write(data);
     });
@@ -364,7 +370,8 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     });
   }, [active]);
 
-  return <div className={`term-host ${active ? "is-active" : "is-inactive"}`} ref={hostRef} onPasteCapture={(event) => {
+  return <div className={`term-host ${active ? "is-active" : "is-inactive"}`} ref={hostRef}
+    id={panelId} role={panelId ? "tabpanel" : undefined} aria-labelledby={tabId} onPasteCapture={(event) => {
     if (transport !== "serial") return;
     event.preventDefault(); event.stopPropagation(); pasteRef.current(event.clipboardData.getData("text/plain"));
   }} />;

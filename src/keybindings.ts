@@ -30,6 +30,7 @@ export type Action =
 
 export type Bindings = Record<Action, string>;
 
+/** macOS bindings. Mod is Command there, so Control+letter stays with the shell. */
 export const DEFAULT_BINDINGS: Bindings = {
   newTab: "Mod+T",
   closeTab: "Mod+W",
@@ -59,6 +60,44 @@ export const DEFAULT_BINDINGS: Bindings = {
   connectSah: "Mod+Shift+H",
   connectConsole: "Mod+Shift+O",
   sshCompat: "Mod+Shift+K",
+};
+
+/**
+ * Bindings off macOS (Linux, Windows). Mod would be Control there, and Control+letter belongs to
+ * the shell (^C, ^A, ^P, ^W...); GTK can also run a menu accelerator before the web view sees the
+ * key. So letter shortcuts use Control+Shift, the terminal convention, and where that collides
+ * with an existing Control+Shift shortcut, Alt is added as well. Must match
+ * OTHER_ACCELERATORS in src-tauri/src/lib.rs (checked by npm test).
+ */
+export const OTHER_BINDINGS: Bindings = {
+  newTab: "Ctrl+Shift+T",
+  closeTab: "Ctrl+Shift+W",
+  nextTab: "Ctrl+Shift+]",
+  prevTab: "Ctrl+Shift+[",
+  copy: "Ctrl+Shift+C",
+  cut: "Ctrl+Shift+X",
+  paste: "Ctrl+Shift+V",
+  selectAll: "Ctrl+Shift+A",
+  clearSelection: "Ctrl+Shift+Alt+A",
+  find: "Ctrl+Shift+F",
+  prefs: "Ctrl+,",
+  clear: "Ctrl+Shift+K",
+  resetTerminal: "Ctrl+Shift+Alt+R",
+  fontLarger: "Ctrl+=",
+  fontSmaller: "Ctrl+-",
+  fontReset: "Ctrl+0",
+  interrupt: "Ctrl+Shift+Alt+C",
+  explain: "Ctrl+Shift+E",
+  saveTranscript: "Ctrl+Shift+S",
+  saveSelection: "Ctrl+Shift+Alt+S",
+  exportHtml: "Ctrl+Shift+Alt+H",
+  print: "Ctrl+Shift+P",
+  logSession: "Ctrl+Shift+L",
+  sessionInfo: "Ctrl+Shift+I",
+  toggleReview: "Ctrl+Shift+R",
+  connectSah: "Ctrl+Shift+H",
+  connectConsole: "Ctrl+Shift+O",
+  sshCompat: "Ctrl+Shift+Alt+K",
 };
 
 /** Menu item ids (src-tauri/src/lib.rs install_menu) that run the same action as a keybinding. */
@@ -134,11 +173,24 @@ export function chordMatches(chord: string, event: KeyEventLike): boolean {
   return codeKey(event.code) === expected;
 }
 
-export function matchAction(event: KeyEventLike, bindings: Bindings = DEFAULT_BINDINGS): Action | null {
+export function platformBindings(mac: boolean = isMac()): Bindings {
+  return mac ? DEFAULT_BINDINGS : OTHER_BINDINGS;
+}
+
+export function matchAction(event: KeyEventLike, bindings: Bindings = platformBindings()): Action | null {
   for (const [action, chord] of Object.entries(bindings) as [Action, string][]) {
     if (chordMatches(chord, event)) return action;
   }
   return null;
+}
+
+/**
+ * xterm's custom key handler: false keeps xterm from processing a key the app handles itself,
+ * so a chord such as Control+Shift+C ("Send Control-C") reaches the session exactly once, from
+ * the app handler, and never also as xterm's own translation of the key.
+ */
+export function terminalHandlesKey(event: KeyEventLike, bindings: Bindings = platformBindings()): boolean {
+  return matchAction(event, bindings) === null;
 }
 
 /** Convert a Tauri menu accelerator ("CmdOrCtrl+Shift+S") to binding notation ("Mod+Shift+S"). */

@@ -326,17 +326,69 @@ fn apply_window_effects(app: &tauri::App) -> Result<(), String> {
     Ok(())
 }
 
+/// Menu accelerators off macOS, keyed by the macOS accelerator written in install_menu.
+/// CmdOrCtrl would be Control there, and Control+letter belongs to the shell (^C, ^A, ^P, ^W...);
+/// GTK can run a menu accelerator before the web view sees the key, which would take those keys
+/// away from the terminal. Letter shortcuts therefore use Control+Shift (the terminal convention),
+/// and where that collides with an existing Control+Shift shortcut, Alt is added as well.
+/// Must match OTHER_BINDINGS in src/keybindings.ts (checked by npm test).
+const OTHER_ACCELERATORS: &[(&str, &str)] = &[
+    ("CmdOrCtrl+,", "Ctrl+,"),
+    ("CmdOrCtrl+T", "Ctrl+Shift+T"),
+    ("CmdOrCtrl+W", "Ctrl+Shift+W"),
+    ("CmdOrCtrl+S", "Ctrl+Shift+S"),
+    ("CmdOrCtrl+Shift+S", "Ctrl+Shift+Alt+S"),
+    ("CmdOrCtrl+Alt+S", "Ctrl+Shift+Alt+H"),
+    ("CmdOrCtrl+Shift+L", "Ctrl+Shift+L"),
+    ("CmdOrCtrl+P", "Ctrl+Shift+P"),
+    ("CmdOrCtrl+X", "Ctrl+Shift+X"),
+    ("CmdOrCtrl+C", "Ctrl+Shift+C"),
+    ("CmdOrCtrl+V", "Ctrl+Shift+V"),
+    ("CmdOrCtrl+A", "Ctrl+Shift+A"),
+    ("CmdOrCtrl+Shift+A", "Ctrl+Shift+Alt+A"),
+    ("CmdOrCtrl+F", "Ctrl+Shift+F"),
+    ("CmdOrCtrl+Shift+E", "Ctrl+Shift+E"),
+    ("CmdOrCtrl+K", "Ctrl+Shift+K"),
+    ("CmdOrCtrl+Alt+R", "Ctrl+Shift+Alt+R"),
+    ("Ctrl+Shift+C", "Ctrl+Shift+Alt+C"),
+    ("CmdOrCtrl+Shift+R", "Ctrl+Shift+R"),
+    ("CmdOrCtrl+Shift+H", "Ctrl+Shift+H"),
+    ("CmdOrCtrl+Shift+O", "Ctrl+Shift+O"),
+    ("CmdOrCtrl+Shift+K", "Ctrl+Shift+Alt+K"),
+    ("CmdOrCtrl+I", "Ctrl+Shift+I"),
+    ("CmdOrCtrl+=", "Ctrl+="),
+    ("CmdOrCtrl+-", "Ctrl+-"),
+    ("CmdOrCtrl+0", "Ctrl+0"),
+    ("CmdOrCtrl+Shift+]", "Ctrl+Shift+]"),
+    ("CmdOrCtrl+Shift+[", "Ctrl+Shift+["),
+];
+
+/// The accelerator to register on this platform. Off macOS an accelerator missing from
+/// OTHER_ACCELERATORS is dropped rather than registered, so it can never take a shell key.
+fn platform_accelerator(accelerator: &str, macos: bool) -> Option<&str> {
+    if macos {
+        return Some(accelerator);
+    }
+    OTHER_ACCELERATORS
+        .iter()
+        .find(|(mac, _)| *mac == accelerator)
+        .map(|(_, other)| *other)
+}
+
 fn item(
     handle: &AppHandle,
     id: &str,
     label: &str,
     accelerator: Option<&str>,
 ) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    let accelerator =
+        accelerator.and_then(|value| platform_accelerator(value, cfg!(target_os = "macos")));
     tauri::menu::MenuItem::with_id(handle, id, label, true, accelerator)
 }
 
 /// Every custom item is routed to the webview as an "afterterm:menu" event with its id.
-/// Accelerators must match DEFAULT_BINDINGS in src/keybindings.ts (checked by npm test).
+/// Accelerators must match DEFAULT_BINDINGS (macOS) and, through OTHER_ACCELERATORS,
+/// OTHER_BINDINGS in src/keybindings.ts (checked by npm test).
 fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
     let handle = app.handle();
@@ -601,6 +653,70 @@ mod registration_tests {
             "prefs_save",
         ] {
             assert!(handler.contains(name), "{name} is not registered");
+        }
+    }
+}
+
+#[cfg(test)]
+mod accelerator_tests {
+    use super::{platform_accelerator, OTHER_ACCELERATORS};
+    use std::collections::HashSet;
+
+    /// Every Some("...") accelerator written in install_menu.
+    fn menu_accelerators() -> Vec<&'static str> {
+        let lib = include_str!("lib.rs");
+        let start = lib.find("fn install_menu").expect("install_menu");
+        let end = start + lib[start..].find("\n}\n").expect("end of install_menu");
+        lib[start..end]
+            .split("Some(\"")
+            .skip(1)
+            .filter_map(|rest| rest.split_once("\")").map(|(value, _)| value))
+            .filter(|value| value.contains('+'))
+            .collect()
+    }
+
+    #[test]
+    fn macos_keeps_the_written_accelerator() {
+        assert_eq!(platform_accelerator("CmdOrCtrl+C", true), Some("CmdOrCtrl+C"));
+        assert_eq!(platform_accelerator("Ctrl+Shift+C", true), Some("Ctrl+Shift+C"));
+    }
+
+    #[test]
+    fn other_platforms_move_letters_to_control_shift() {
+        assert_eq!(platform_accelerator("CmdOrCtrl+C", false), Some("Ctrl+Shift+C"));
+        assert_eq!(platform_accelerator("CmdOrCtrl+A", false), Some("Ctrl+Shift+A"));
+        assert_eq!(platform_accelerator("CmdOrCtrl+P", false), Some("Ctrl+Shift+P"));
+        assert_eq!(platform_accelerator("CmdOrCtrl+Shift+S", false), Some("Ctrl+Shift+Alt+S"));
+        assert_eq!(platform_accelerator("Ctrl+Shift+C", false), Some("Ctrl+Shift+Alt+C"));
+        assert_eq!(platform_accelerator("CmdOrCtrl+=", false), Some("Ctrl+="));
+        assert_eq!(platform_accelerator("CmdOrCtrl+Q", false), None);
+    }
+
+    #[test]
+    fn every_menu_accelerator_has_an_other_platform_entry() {
+        let accelerators = menu_accelerators();
+        assert!(accelerators.len() >= 25, "parsed {accelerators:?}");
+        for accelerator in accelerators {
+            assert!(
+                platform_accelerator(accelerator, false).is_some(),
+                "{accelerator} has no OTHER_ACCELERATORS entry"
+            );
+        }
+    }
+
+    #[test]
+    fn other_platform_accelerators_never_take_a_shell_control_key() {
+        let mut macs = HashSet::new();
+        let mut others = HashSet::new();
+        for (mac, other) in OTHER_ACCELERATORS {
+            assert!(macs.insert(*mac), "{mac} listed twice");
+            assert!(others.insert(*other), "{other} used twice");
+            let parts: Vec<&str> = other.split('+').collect();
+            let key = parts.last().expect("key");
+            assert!(!parts.contains(&"CmdOrCtrl"), "{other} must name Ctrl explicitly");
+            if key.len() == 1 && key.chars().all(|c| c.is_ascii_alphabetic()) {
+                assert!(parts.contains(&"Shift"), "{other} would take Control+{key} from the shell");
+            }
         }
     }
 }
