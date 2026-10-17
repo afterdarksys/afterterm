@@ -12,16 +12,19 @@ reference only.
 The emulator is a real PTY. k9s, nmap, tcpdump, tshark, vim, tmux, ssh, and
 curses apps have to work — not “work unless you used the AI prompt box.”
 
-AI is a layer, not the floor. No account required to open a shell. New PTY sessions use **reviewed submissions**: every Enter or multiline input packet is
-held until reviewed. Tab, history and cursor editing cannot silently disable review.
-The dialog shows an unverified explicit target argument when available, otherwise
-`unknown target`; the app never infers the shell’s target from its own environment.
+AI is a layer, not the floor. No account required to open a shell. New PTY sessions start in
+**direct terminal** mode: Enter goes straight to the shell, as in any terminal. The status bar
+says **review off**.
 
-For vim, tmux, k9s and ordinary unrestricted interactive work, choose **Use direct
-terminal** and type `DIRECT`. The status bar then says **review off**. Re-enable
-review explicitly when needed. This is submission review, not a command sandbox
-or proof that a host/account is production. An approved paste may contain several
-commands; review its entire contents. Cancel sends Ctrl+C and discards held bytes.
+**Submission review** is opt-in per tab: press **Enable submission review** in the footer and
+every Enter or multiline input packet is held until you approve it in a dialog. Tab, history and
+cursor editing cannot silently disable review once it is on. The dialog shows an unverified
+explicit target argument when available, otherwise `unknown target`; the app never infers the
+shell's target from its own environment. To turn review back off choose **Use direct terminal**
+and type `DIRECT`. Review is submission review, not a command sandbox or proof that a
+host/account is production. An approved paste may contain several commands; review its entire
+contents. Cancel sends Ctrl+C and discards held bytes. Console mode (`afterterm console`) never
+reviews.
 
 ## Why this exists
 
@@ -31,7 +34,7 @@ terminal for people who live in packets, clusters, and shells:
 - Standards-compatible PTY (`xterm-256color`, truecolor)
 - Installable on its own — no AfterEdit, no account
 - macOS and Linux from the start
-- Explicit reviewed submissions or direct terminal mode
+- Direct terminal by default, with opt-in per-tab submission review
 - Desktop launches still find Homebrew, mise, cargo, asdf
 
 ## Run
@@ -49,6 +52,101 @@ npm test
 npm run test:integration
 cargo test --workspace
 ```
+
+## Menus, keyboard and VoiceOver
+
+Every command is in the macOS menu bar with a keyboard shortcut, and the same
+shortcut works inside the window. Mod means Command on macOS and Control on Linux.
+Panels move keyboard focus to their heading or first control when they open,
+close with Escape, and return focus to the terminal. Results such as "Copied 42
+characters" or "Theme Nocturne applied" are announced through the status line,
+which is a polite live region. Screen reader mode for terminal output is on by
+default (Preferences, Terminal behavior).
+
+AfterTerm menu: About AfterTerm; Preferences (Mod+Comma); Services; Hide;
+Quit AfterTerm (Mod+Q).
+
+File menu:
+- New Tab (Mod+T) and Close Tab (Mod+W).
+- Save Transcript (Mod+S) saves the whole scrollback of the active tab as plain
+  text. Save Selection (Mod+Shift+S) saves only the selected text. Export
+  Transcript as HTML (Mod+Option+S) writes a script-free HTML page with the
+  transcript as preformatted text. Escape sequences are removed in all three.
+- Log Session to File (Mod+Shift+L) starts or stops appending the active tab's
+  raw output, escape sequences included, to a file you choose. The Session Info
+  panel shows the path and byte count while it is on. If the disk fails or cannot
+  keep up, logging stops (the terminal never waits for the log) and the panel
+  announces "Session log stopped" with the reason.
+- Print Transcript (Mod+P) prints the scrollback as plain text.
+
+Files are chosen in the native save dialog, which runs in the Rust side; the web
+view never supplies a path. AfterTerm refuses symbolic links, hard-linked files,
+devices and FIFOs, files owned by another user, and anything inside its own
+configuration or data folders, and leaves saved files readable only by you
+(mode 0600).
+
+Edit menu: Cut (Mod+X), Copy (Mod+C), Paste (Mod+V), Select All (Mod+A),
+Clear Selection (Mod+Shift+A), Find (Mod+F), Explain Selection (Mod+Shift+E).
+Copy uses the system clipboard directly. Terminal output cannot be deleted, so
+Cut copies the selection and then clears it, and says so. Paste goes through the
+same path as typing: bracketed paste is honored and, when submission review is on
+for the tab, the Enter is held for approval. In a text field inside a panel these
+commands act on that field instead of the terminal. Copy on select is an option
+in Preferences and is off by default.
+
+Shell menu:
+- Clear Scrollback (Mod+K).
+- Reset Terminal (Mod+Option+R) resets the screen and types stty sane into the
+  session, followed by Enter.
+- Show Terminal Settings types stty -a; the settings appear as terminal output.
+- Send Control-C (Control+Shift+C) and the Send Signal submenu: SIGINT, SIGTSTP,
+  SIGQUIT, SIGHUP and SIGTERM. Signals go to the foreground process group of the
+  tab's terminal, and only when that group belongs to the tab's own session;
+  otherwise to the tab's own program.
+- Toggle Submission Review (Mod+Shift+R). Turning review off still asks you to
+  type DIRECT.
+- Connect SAH (Mod+Shift+H), Connect Serial Console (Mod+Shift+O) and SSH
+  Compatibility (Mod+Shift+K).
+
+Commands that type into the session never run on their own: each one needs you to
+choose it, and each goes through the normal input path, so review applies. When
+the shell is in the foreground, AfterTerm first sends Control-U to clear anything
+already typed on the command line; this assumes a readline-style line editor such
+as bash, zsh or fish. When another program is in the foreground (vim, ssh, a router
+CLI), the text would go to that program instead, so you must type SEND to confirm.
+
+View menu: Session Info (Mod+I); Bigger Text (Mod+Equals), Smaller Text
+(Mod+Minus), Default Text Size (Mod+0); Preferences and Themes.
+
+Window menu: Minimize, Zoom, Next Tab (Mod+Shift+Right Bracket), Previous Tab
+(Mod+Shift+Left Bracket).
+
+### Session Info panel
+
+For the active tab it lists: tab title, transport, program and arguments (the
+SAH host for a SAH tab), process ID, foreground process group, current
+directory, rows and columns, start time, bytes received and sent, exit code,
+submission review state, and session log state. It refreshes every second.
+
+Below the facts are labeled controls: one button per signal; Reset terminal;
+Show current settings (stty -a); a stty section with a Leave unchanged, Turn on
+or Turn off choice for echo, icanon, isig and ixon, and fields for the erase,
+interrupt and end-of-file characters in caret notation (for example ^H, ^? or
+^C) or the word undef. The section shows the single stty command it will send
+and sends it only when you press Apply. A checkbox turns the session log on or
+off. Serial tabs show their port settings; signals, stty and logging apply to
+local terminal tabs only.
+
+### Preferences panel
+
+Sections, each with a heading: Theme and colors (theme by name; per-theme colors
+accept a name such as red, navy or amber, a hex value, or rgba, and each field
+reads back the current value and its nearest color name; palette export and
+import as JSON; window transparency), Text (font, size, line height), Cursor and
+bell (shape, blink, reduce motion, bell none, sound or visual flash), Terminal
+behavior (screen reader mode, Option as Meta, copy on select, scrollback lines,
+start new tabs with submission review on, which is off by default), AI, and
+Reset all preferences to defaults, which asks for confirmation first.
 
 ## Reliability and product direction
 
@@ -111,9 +209,10 @@ config file, which must exist. Missing default files use GUI; malformed files,
 unknown settings, and invalid modes report an error. This launcher file is
 separate from desktop appearance preferences and SAH's own config.
 
-GUI sessions start reviewed: every CR/LF input packet is held for review.
-For full-screen tools, explicitly switch the tab to Direct mode using the
-existing confirmation. Console mode is direct, with no AfterTerm input review;
+GUI sessions start in direct mode. Submission review is opt-in per tab (footer
+button, Shell > Toggle Submission Review, or the "start new tabs with submission
+review on" preference); when it is on, every CR/LF input packet is held for
+review. Console mode is always direct, with no AfterTerm input review;
 it preserves the client's controlling TTY, signals, pipes and exit status.
 AfterTerm does not infer verified remote target identity from a host argument
 or client output. SAH server policy and authorization remain the client's and
@@ -160,7 +259,7 @@ future work. Physical hardware qualification is still required.
 
 ## Appearance and direction
 
-**Appearance → Customize palette** edits terminal and application colors per
+**Preferences, Customize colors** edits terminal and application colors per
 preset, including all 16 ANSI colors. Export/import palette JSON or reset the
 current palette. Desktop preferences retain overrides, scrollback and cursor
 motion settings.

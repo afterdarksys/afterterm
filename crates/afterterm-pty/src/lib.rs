@@ -10,5 +10,6 @@ pub use context::{gather, looks_like_production, target, ActiveContext};
 pub use destructive::{answered, challenge_for, is_destructive, is_infra_apply, Challenge};
 pub use gate::{challenge_for_line, line_is_destructive, LineTracker, Step};
 pub use session::{
-    HoldResolution, SessionId, SessionInfo, SessionManager, Sink, SpawnOpts, WriteOutcome,
+    HoldResolution, LogStatus, SessionDetails, SessionId, SessionInfo, SessionManager, Signal,
+    Sink, SpawnOpts, WriteOutcome,
 };

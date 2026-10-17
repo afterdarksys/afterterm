@@ -1,6 +1,6 @@
 import { test, expect, type Page } from '@playwright/test';
 
-async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?: boolean; launchArgs?: string[] } = {}) {
+async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?: boolean; launchArgs?: string[]; direct?: boolean; prefsFail?: boolean } = {}) {
   await page.addInitScript((options) => {
     const w = window as any;
     const callbacks = new Map<number, Function>();
@@ -29,9 +29,9 @@ async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?
           case 'launch_args': return options.launchArgs ?? [];
           case 'plugin:event|listen': {const id=next++;listeners.set(id,args);return id;}
           case 'plugin:event|unlisten': return;
-          case 'prefs_load': return {theme:'signal',font_family:'monospace',font_size:13,transparency:1,cursor_style:'bar',scrollback:10000,reduced_motion:true,ai_enabled:false};
+          case 'prefs_load': if (options.prefsFail) throw Error('prefs.json is not valid JSON'); return {theme:'signal',font_family:'monospace',font_size:13,transparency:1,cursor_style:'bar',scrollback:10000,reduced_motion:true,ai_enabled:false};
           case 'pty_spawn': {
-            const id=++session; w.sessions[id]={reviewed:true};
+            const id=++session; w.sessions[id]={reviewed:!options.direct};
             if(options.delaySpawn && id===1) await new Promise<void>(resolve => {w.resolveSpawn=resolve;});
             return id;
           }
@@ -42,7 +42,7 @@ async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?
           }
           case 'pty_set_title': case 'pty_resize': case 'prefs_save': return;
           case 'pty_kill': delete w.sessions[args.id]; delete w.pending[args.id]; return;
-          case 'pty_write': return null;
+          case 'pty_write': if (w.failWrite) throw Error('pty write failed: broken pipe'); return null;
           case 'pty_review': return w.pending[args.id] ?? null;
           case 'pty_confirm':
             if(w.confirmFailures-- > 0) throw Error('Injected delivery failure');
@@ -50,10 +50,15 @@ async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?
             if(w.loseReply) {w.loseReply=false;throw Error('Reply lost after execution');}
             return;
           case 'pty_set_reviewed':
+            if(w.failMode) throw Error('Resolve the pending submission before changing modes');
             w.sessions[args.id].reviewed=args.reviewed;
             if(w.loseModeReply) {w.loseModeReply=false;throw Error('Mode reply lost');}
             return;
+          case 'pty_info': return {id:args.id,title:'shell',program:'/bin/zsh',args:[],pid:4242,foreground_pgid:w.foreground ?? 4242,start_cwd:'/Users/test',cwd:'/tmp',rows:24,cols:80,started_at_ms:0,bytes_in:10,bytes_out:2048,exit:null,reviewed:false,log:w.logError ? {path:'/tmp/s.log',bytes:5,error:w.logError,active:false} : null};
+          case 'pty_signal': return 'foreground process group 4242';
           case 'serial_ports': return [];
+          case 'plugin:clipboard-manager|read_text': return new Promise<string>(resolve => { w.resolveClipboard = resolve; });
+          case 'plugin:clipboard-manager|write_text': w.copied = args.text; return;
           default: throw Error(`Unexpected native command ${command}`);
         }
       },
@@ -212,4 +217,146 @@ test('output received during snapshot attachment is available in real terminal s
     await page.keyboard.press(`${mod}+c`);
     await expect.poll(()=>page.evaluate(()=>(window as any).copied)).toBe(text);
   }
+});
+
+const menu = (page:Page, id:string) => page.evaluate(id => (window as any).emit('afterterm:menu', id), id);
+const status = (page:Page) => page.locator('footer [role=status]');
+
+test('Edit menu paste uses the same bracketed, review-aware path as the shortcut', async ({page}) => {
+  await harness(page); await ready(page);
+  await menu(page, 'edit.paste');
+  await expect.poll(()=>page.evaluate(()=>typeof (window as any).resolveClipboard)).toBe('function');
+  await page.evaluate(()=>(window as any).resolveClipboard('menu-paste'));
+  await expect.poll(async()=>(await calls(page,'pty_write')).filter((x:any)=>x.args.data.includes('menu-paste'))).toEqual([
+    {command:'pty_write',args:{id:1,data:'\x1b[200~menu-paste\x1b[201~'}}
+  ]);
+});
+
+test('Edit menu select all, copy and cut use the native clipboard and announce the result', async ({page}) => {
+  await harness(page); await ready(page);
+  await menu(page, 'edit.copy');
+  await expect(status(page)).toContainText('Nothing is selected');
+  await menu(page, 'edit.select-all');
+  await menu(page, 'edit.cut');
+  await expect.poll(()=>page.evaluate(()=>(window as any).copied)).toContain('boot-ready');
+  await expect(status(page)).toContainText('Cut works like Copy');
+});
+
+test('Session Info opens from the menu, takes focus, and Escape returns focus to the terminal', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.locator('.term-host.is-active .xterm-helper-textarea').focus();
+  await menu(page, 'view.session-info');
+  await expect(page.getByRole('heading', {name:'Session info'})).toBeFocused();
+  await expect(page.getByRole('dialog', {name:'Session info'})).toContainText('/bin/zsh');
+  await expect(page.getByRole('dialog', {name:'Session info'})).toContainText('24 rows by 80 columns');
+  await page.keyboard.press('Escape');
+  await expect(page.getByRole('dialog', {name:'Session info'})).toHaveCount(0);
+  await expect(page.locator('.term-host.is-active .xterm-helper-textarea')).toBeFocused();
+});
+
+test('stty controls compose one command and send it only on Apply; signals go by name', async ({page}) => {
+  await harness(page); await ready(page);
+  await menu(page, 'view.session-info');
+  const panel = page.getByRole('dialog', {name:'Session info'});
+  await panel.getByLabel('Echo typed characters (echo)').selectOption('off');
+  await panel.getByLabel('Erase character').fill('^h');
+  await expect(panel).toContainText("Command to send: stty -echo erase '^H'");
+  expect((await calls(page,'pty_write')).some((x:any)=>x.args.data.includes('stty'))).toBe(false);
+  await panel.getByRole('button', {name:'Apply'}).click();
+  await expect.poll(async()=>(await calls(page,'pty_write')).filter((x:any)=>x.args.data.includes('stty')).map((x:any)=>x.args.data)).toEqual(["\u0015stty -echo erase '^H'\n"]);
+  await panel.getByLabel('Erase character').fill('$(id)');
+  await expect(panel.getByRole('button', {name:'Apply'})).toBeDisabled();
+  await panel.getByRole('button', {name:'Terminate (SIGTERM)'}).click();
+  await expect.poll(async()=>(await calls(page,'pty_signal')).map((x:any)=>x.args)).toEqual([{id:1,signal:'TERM'}]);
+  await expect(status(page)).toContainText('Sent SIGTERM to foreground process group 4242');
+});
+
+test('Preferences announce a theme chosen by name and ask before resetting everything', async ({page}) => {
+  await harness(page); await ready(page);
+  await menu(page, 'app.prefs');
+  const panel = page.getByRole('dialog', {name:'Preferences'});
+  await expect(panel.getByRole('combobox', {name:'Theme', exact:true})).toBeFocused();
+  await panel.getByRole('combobox', {name:'Theme', exact:true}).selectOption({label:'Nocturne'});
+  await expect(status(page)).toContainText('Theme Nocturne applied');
+  await panel.getByRole('button', {name:'Reset all preferences to defaults…'}).click();
+  await expect(panel.getByRole('button', {name:'Cancel'})).toBeFocused();
+  await panel.getByRole('button', {name:'Reset to defaults'}).click();
+  await expect(panel.getByRole('combobox', {name:'Theme', exact:true})).toHaveValue('signal');
+  await expect(status(page)).toContainText('All preferences reset to defaults');
+});
+
+test('typed commands go to another foreground program only after typing SEND', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.evaluate(()=>{(window as any).foreground = 999;});
+  await menu(page, 'shell.stty-show');
+  const dialog = page.getByRole('dialog', {name:/foreground/});
+  await expect(dialog).toContainText('process group 999');
+  expect((await calls(page,'pty_write')).some((x:any)=>x.args.data.includes('stty'))).toBe(false);
+  await page.getByLabel('Confirmation text').fill('SEND');
+  await page.getByRole('button',{name:'Approve',exact:true}).click();
+  await expect.poll(async()=>(await calls(page,'pty_write')).filter((x:any)=>x.args.data.includes('stty')).map((x:any)=>x.args.data)).toEqual(['stty -a\n']);
+});
+
+test('a failed write is announced instead of a success message', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.evaluate(()=>{(window as any).failWrite = true;});
+  await menu(page, 'shell.reset');
+  await expect(status(page)).toContainText('Write failed');
+  await page.waitForTimeout(200);
+  await expect(status(page)).not.toContainText('stty sane sent');
+});
+
+test('edit commands in a number field or other control never reach the terminal', async ({page}) => {
+  await harness(page); await ready(page);
+  await menu(page, 'app.prefs');
+  const field = page.getByRole('spinbutton', {name:'Scrollback lines'});
+  await field.focus();
+  await menu(page, 'edit.paste');
+  await expect.poll(()=>page.evaluate(()=>typeof (window as any).resolveClipboard)).toBe('function');
+  await page.evaluate(()=>(window as any).resolveClipboard('5000'));
+  await expect(field).toHaveValue('5000');
+  expect((await calls(page,'pty_write')).some((x:any)=>x.args.data.includes('5000'))).toBe(false);
+  await page.getByRole('combobox', {name:'Bell'}).focus();
+  await menu(page, 'edit.paste');
+  await expect(status(page)).toContainText('move focus there first');
+});
+
+test('a failed review toggle never announces that review is on', async ({page}) => {
+  await harness(page, {direct:true}); await ready(page);
+  await page.evaluate(()=>{(window as any).failMode = true;});
+  await menu(page, 'shell.toggle-review');
+  await expect(status(page)).toContainText('Resolve the pending submission');
+  await page.waitForTimeout(200);
+  await expect(status(page)).not.toContainText('Submission review on');
+});
+
+test('a shortcut and its menu echo run once, but two quick presses both run', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.locator('.term-host.is-active .xterm-helper-textarea').focus();
+  await page.keyboard.press(`${mod}+Equal`);
+  await menu(page, 'view.font-larger');
+  await ready(page);
+  const sizes = async () => (await calls(page,'prefs_save')).map((x:any)=>x.args.prefs.font_size);
+  await expect.poll(sizes).toEqual([14]);
+  await page.keyboard.press(`${mod}+Equal`);
+  await page.keyboard.press(`${mod}+Equal`);
+  await expect.poll(sizes).toEqual([14, 15, 16]);
+  await menu(page, 'view.font-larger');
+  await expect.poll(sizes).toEqual([14, 15, 16]);
+  await page.mouse.click(5, 300);
+  await menu(page, 'view.font-larger');
+  await expect.poll(sizes).toEqual([14, 15, 16, 17]);
+});
+
+test('unreadable preferences stay announced after the shell starts', async ({page}) => {
+  await harness(page, {prefsFail:true}); await ready(page);
+  await expect(status(page)).toContainText('Shell ready. Preferences could not be read');
+});
+
+test('a session log that stops on its own is announced', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.evaluate(()=>{(window as any).logError = 'the log file could not keep up with terminal output';});
+  await menu(page, 'view.session-info');
+  await expect(status(page)).toContainText('Session log stopped: the log file could not keep up');
+  await expect(page.getByRole('checkbox', {name:'Log session output to a file'})).not.toBeChecked();
 });

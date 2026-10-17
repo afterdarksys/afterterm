@@ -15,9 +15,10 @@ type Props = {
   onCancel: () => void;
   busy?: boolean;
   error?: string;
+  kicker?: string;
 };
 
-export function ConfirmDialog({ challenge, typed, onTyped, onConfirm, onCancel, busy = false, error = "" }: Props) {
+export function ConfirmDialog({ challenge, typed, onTyped, onConfirm, onCancel, busy = false, error = "", kicker = "Submission review" }: Props) {
   const formRef = useRef<HTMLFormElement>(null);
   useEffect(() => {
     const previous = document.activeElement as HTMLElement | null;
@@ -42,7 +43,7 @@ export function ConfirmDialog({ challenge, typed, onTyped, onConfirm, onCancel, 
           if (ok && !busy) onConfirm();
         }}
       >
-        <p className="confirm-kicker">Submission review</p>
+        <p className="confirm-kicker">{kicker}</p>
         <h2 id="confirm-title">{challenge.action}</h2>
         <p>{challenge.reason}. Type <strong>{challenge.expected}</strong> to approve, or cancel.</p>
         {challenge.input && <><p>Held input (control characters escaped; earlier typing may already be visible in the terminal):</p><pre className="submission-preview">{challenge.input}</pre></>}

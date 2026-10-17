@@ -285,3 +285,26 @@ button:disabled { opacity: 0.5; cursor: not-allowed; }
 .console-helper { border-top: 1px solid var(--line); padding-block: 8px; }
 
 .submission-preview { max-height: 12rem; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; }
+
+.prefs h3 { margin: 4px 0 8px; font-size: 13px; font-weight: 600; color: var(--text); }
+.prefs section { display: grid; gap: 10px; }
+.prefs textarea, .prefs fieldset { min-width: 0; }
+.prefs h2:focus, .prefs h2:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.prefs :focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.color-field small { font-size: 11px; color: var(--muted); }
+.facts { margin: 0; display: grid; gap: 6px; font-size: 12px; }
+.facts div { display: grid; grid-template-columns: minmax(0, 11em) 1fr; gap: 8px; }
+.facts dt { color: var(--muted); }
+.facts dd { margin: 0; overflow-wrap: anywhere; font-family: var(--mono); }
+.button-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
+.session-panel fieldset { border: 1px solid var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 10px; }
+.session-panel legend { font-size: 12px; color: var(--text); }
+.term-host.bell-flash { outline: 3px solid var(--accent); outline-offset: -3px; }
+
+.print-view { display: none; }
+@media print {
+  html, body, #root, .shell { height: auto; overflow: visible; background: #fff; color: #000; }
+  .shell { display: block; }
+  .shell > :not(.print-view) { display: none !important; }
+  .print-view { display: block; margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; font: 10pt var(--mono); color: #000; }
+}

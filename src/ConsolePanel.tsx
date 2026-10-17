@@ -4,6 +4,7 @@ import { ConsoleProfileNotes } from "./ConsoleProfileNotes.tsx";
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { isTauri } from "./native.ts";
+import { usePanel } from "./usePanel.ts";
 
 import { DEFAULT_CONSOLE, type ConsoleConfig, type ConsolePort } from "./console.ts";
 export type { ConsoleConfig } from "./console.ts";
@@ -20,8 +21,9 @@ export function ConsolePanel({ onConnect, onClose }: {
     catch (e) { setError(String(e)); }
   };
   useEffect(() => { void refresh(); }, []);
-  return <aside className="prefs" aria-label="Serial console">
-    <header><h2>Connect a console</h2><button disabled={busy} onClick={onClose} aria-label="Close console settings">×</button></header>
+  const panelRef = usePanel<HTMLElement>(() => { if (!busy) onClose(); });
+  return <aside ref={panelRef} className="prefs" role="dialog" aria-labelledby="console-panel-title">
+    <header><h2 id="console-panel-title" tabIndex={-1}>Connect a console</h2><button disabled={busy} onClick={onClose}>Close</button></header>
     <p className="prefs-note">Direct USB / serial access to switches, routers, servers, and appliances.</p>
     <form className="console-form" onSubmit={async (event) => {
       event.preventDefault(); setBusy(true); setError("");

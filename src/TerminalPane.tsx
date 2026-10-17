@@ -12,8 +12,39 @@ import "@xterm/xterm/css/xterm.css";
 import type { Challenge } from "./ConfirmDialog.tsx";
 import type { Prefs } from "./prefs.ts";
 import { resolveTheme, withAlpha } from "./themes.ts";
+import { writeClipboard } from "./clipboard.ts";
+import { linesToText } from "./transcript.ts";
 
 const MAX_LAYOUT_FRAMES = 60;
+
+let audio: AudioContext | null = null;
+function beep() {
+  try {
+    audio ??= new AudioContext();
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    oscillator.frequency.value = 880;
+    gain.gain.value = 0.08;
+    oscillator.connect(gain).connect(audio.destination);
+    oscillator.start();
+    oscillator.stop(audio.currentTime + 0.09);
+  } catch {
+    /* no audio output available */
+  }
+}
+
+function terminalOptions(prefs: Prefs) {
+  return {
+    fontFamily: prefs.fontFamily,
+    fontSize: prefs.fontSize,
+    lineHeight: prefs.lineHeight,
+    cursorBlink: prefs.cursorBlink && !prefs.reducedMotion,
+    cursorStyle: prefs.cursorStyle,
+    scrollback: prefs.scrollback,
+    macOptionIsMeta: prefs.optionAsMeta,
+    screenReaderMode: prefs.screenReaderMode,
+  };
+}
 
 function decodeChunk(encoded: string): Uint8Array {
   const binary = atob(encoded);
@@ -24,6 +55,9 @@ function decodeChunk(encoded: string): Uint8Array {
   return bytes;
 }
 
+/** sent: written to the session; held: waiting for submission review; failed: not written (already announced). */
+export type WriteResult = "sent" | "held" | "failed";
+
 export type TerminalPaneHandle = {
   focus: () => void;
   fit: () => void;
@@ -33,6 +67,16 @@ export type TerminalPaneHandle = {
   findNext: (query: string) => void;
   findPrev: (query: string) => void;
   getSelection: () => string;
+  selectAll: () => void;
+  clearSelection: () => void;
+  hasSelection: () => boolean;
+  /** Whole normal-buffer scrollback as plain text, escape sequences stripped. */
+  transcript: () => string;
+  /** Send text through the normal input path, so submission review still applies. */
+  send: (text: string) => Promise<WriteResult>;
+  /** Full xterm reset of the local renderer (does not write to the session). */
+  reset: () => void;
+  size: () => { rows: number; cols: number } | null;
 };
 
 type Props = {
@@ -72,16 +116,18 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   const resize = (rows: number, cols: number) => transport === "serial" ? Promise.resolve() : invoke("pty_resize", { id: sessionRef.current, rows, cols });
   const writeQueue = useRef<Promise<void>>(Promise.resolve());
   const attachedRef = useRef(onAttached); attachedRef.current = onAttached;
-  const write = (data: string) => {
-    writeQueue.current = writeQueue.current.then(async () => {
+  const write = (data: string): Promise<WriteResult> => {
+    const result = writeQueue.current.then(async (): Promise<WriteResult> => {
     try {
       if (consoleConfig) data = consoleInput(data, consoleConfig);
       const challenge = await invoke<Challenge | null>(`${transport}_write`, { id: sessionRef.current, data });
       if (!challenge && consoleConfig?.localEcho) termRef.current?.write(data);
-      if (challenge) challengeRef.current(sessionRef.current, challenge);
-    } catch (error) { onStatusRef.current(`Write failed: ${String(error)}`); }
+      if (challenge) { challengeRef.current(sessionRef.current, challenge); return "held"; }
+      return "sent";
+    } catch (error) { onStatusRef.current(`Write failed: ${String(error)}`); return "failed"; }
     });
-    return writeQueue.current;
+    writeQueue.current = result.then(() => undefined);
+    return result;
   };
 
   useImperativeHandle(ref, () => ({
@@ -110,6 +156,24 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       searchRef.current?.findPrevious(query);
     },
     getSelection: () => termRef.current?.getSelection() ?? "",
+    selectAll: () => termRef.current?.selectAll(),
+    clearSelection: () => termRef.current?.clearSelection(),
+    hasSelection: () => termRef.current?.hasSelection() ?? false,
+    transcript: () => {
+      const buffer = termRef.current?.buffer.normal;
+      if (!buffer) return "";
+      const lines = [];
+      for (let i = 0; i < buffer.length; i += 1) {
+        const line = buffer.getLine(i);
+        // Keep trailing spaces on a row that soft-wraps into the next, so words stay separated.
+        const continues = buffer.getLine(i + 1)?.isWrapped ?? false;
+        if (line) lines.push({ text: line.translateToString(!continues), wrapped: line.isWrapped });
+      }
+      return linesToText(lines);
+    },
+    send: (text: string) => write(text),
+    reset: () => termRef.current?.reset(),
+    size: () => (termRef.current ? { rows: termRef.current.rows, cols: termRef.current.cols } : null),
   }));
 
   useEffect(() => {
@@ -118,11 +182,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
 
     const theme = withAlpha(resolveTheme(prefsRef.current.theme, prefsRef.current.themeOverrides[prefsRef.current.theme]).terminal, prefsRef.current.transparency);
     const term = new Terminal({
-      fontFamily: prefsRef.current.fontFamily,
-      fontSize: prefsRef.current.fontSize,
-      cursorBlink: !prefsRef.current.reducedMotion,
-      cursorStyle: prefsRef.current.cursorStyle,
-      scrollback: prefsRef.current.scrollback,
+      ...terminalOptions(prefsRef.current),
       allowProposedApi: true,
       theme,
     });
@@ -239,6 +299,27 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       void write(data);
     });
     const title = term.onTitleChange((value) => onTitleRef.current(value || "shell"));
+    let flash = 0;
+    const bell = term.onBell(() => {
+      const style = prefsRef.current.bellStyle;
+      if (style === "sound") beep();
+      if (style === "visual") {
+        host.classList.add("bell-flash");
+        window.clearTimeout(flash);
+        flash = window.setTimeout(() => host.classList.remove("bell-flash"), 150);
+      }
+    });
+    let copyTimer = 0;
+    const selection = term.onSelectionChange(() => {
+      if (!prefsRef.current.copyOnSelect) return;
+      window.clearTimeout(copyTimer);
+      copyTimer = window.setTimeout(() => {
+        const text = term.getSelection();
+        if (text) void writeClipboard(text)
+          .then(() => onStatusRef.current(`Copied ${text.length} characters on select`))
+          .catch((error) => onStatusRef.current(`Copy failed: ${String(error)}`));
+      }, 300);
+    });
 
     return () => {
       disposed = true;
@@ -246,6 +327,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       observer?.disconnect();
       input.dispose();
       title.dispose();
+      bell.dispose();
+      selection.dispose();
+      window.clearTimeout(flash);
+      window.clearTimeout(copyTimer);
       listeners.forEach((unlisten) => unlisten());
       webgl?.dispose();
       term.dispose();
@@ -258,11 +343,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     if (!term) return;
     const id = requestAnimationFrame(() => {
       term.options.theme = withAlpha(resolveTheme(prefs.theme, prefs.themeOverrides[prefs.theme]).terminal, prefs.transparency);
-      term.options.fontFamily = prefs.fontFamily;
-      term.options.fontSize = prefs.fontSize;
-      term.options.cursorStyle = prefs.cursorStyle;
-      term.options.cursorBlink = !prefs.reducedMotion;
-      term.options.scrollback = prefs.scrollback;
+      Object.assign(term.options, terminalOptions(prefs));
     });
     return () => cancelAnimationFrame(id);
   }, [prefs]);

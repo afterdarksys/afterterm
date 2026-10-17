@@ -1,3 +1,4 @@
+mod files;
 mod launch;
 mod prefs;
 mod serial;
@@ -12,12 +13,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use afterterm_pty::session::{
-    HoldResolution, SessionId, SessionInfo, SessionManager, Sink, SpawnOpts, WriteOutcome,
+    HoldResolution, LogStatus, SessionDetails, SessionId, SessionInfo, SessionManager, Signal,
+    Sink, SpawnOpts, WriteOutcome,
 };
 use afterterm_pty::Challenge;
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine as _;
 use serde::Serialize;
+use std::io::Write as _;
 use tauri::{AppHandle, Emitter, Manager, RunEvent, State};
 
 struct AppSink {
@@ -192,6 +195,110 @@ fn pty_set_reviewed(
 }
 
 #[tauri::command]
+fn pty_info(state: State<PtyHandle>, id: u64) -> Result<SessionDetails, String> {
+    state.0.details(session_id(id))
+}
+
+#[tauri::command]
+fn pty_signal(state: State<PtyHandle>, id: u64, signal: String) -> Result<String, String> {
+    state.0.signal(session_id(id), Signal::parse(&signal)?)
+}
+
+/// Folders AfterTerm owns (config, data, logs, cache); user saves and logs are never written inside them.
+fn protected_dirs(app: &AppHandle) -> Vec<PathBuf> {
+    let path = app.path();
+    [
+        path.app_config_dir(),
+        path.app_data_dir(),
+        path.app_local_data_dir(),
+        path.app_log_dir(),
+        path.app_cache_dir(),
+    ]
+        .into_iter()
+        .filter_map(Result::ok)
+        .collect()
+}
+
+/// Run the native save dialog in Rust. The webview only suggests a file name;
+/// it never supplies the path that is written.
+async fn choose_save_path(
+    app: &AppHandle,
+    window: &tauri::Window,
+    suggested: &str,
+    label: &str,
+    extension: &str,
+) -> Result<Option<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dialog = app
+        .dialog()
+        .file()
+        .set_parent(window)
+        .set_can_create_directories(true)
+        .set_file_name(files::safe_file_name(suggested, extension))
+        .add_filter(label, &[extension]);
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_save_file())
+        .await
+        .map_err(|e| e.to_string())?;
+    match picked {
+        None => Ok(None),
+        Some(path) => path.into_path().map(Some).map_err(|e| e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn save_text_file(
+    app: AppHandle,
+    window: tauri::Window,
+    kind: String,
+    suggested_name: String,
+    contents: String,
+) -> Result<Option<String>, String> {
+    if contents.len() > files::MAX_SAVE_BYTES {
+        return Err("The text is larger than 64 MiB; reduce scrollback or save a selection".into());
+    }
+    let (label, extension) = match kind.as_str() {
+        "transcript" | "selection" => ("Plain text", "txt"),
+        "html" => ("HTML document", "html"),
+        _ => return Err(format!("Unknown save kind: {kind}")),
+    };
+    let Some(path) = choose_save_path(&app, &window, &suggested_name, label, extension).await? else {
+        return Ok(None);
+    };
+    let mut file = files::open_for_write(&path, &protected_dirs(&app), false)?;
+    file.write_all(contents.as_bytes())
+        .and_then(|()| file.sync_all())
+        .map_err(|e| format!("Could not write {}: {e}", path.display()))?;
+    Ok(Some(path.display().to_string()))
+}
+
+#[tauri::command]
+async fn pty_log_start(
+    app: AppHandle,
+    window: tauri::Window,
+    state: State<'_, PtyHandle>,
+    id: u64,
+    suggested_name: String,
+) -> Result<Option<String>, String> {
+    let Some(path) = choose_save_path(&app, &window, &suggested_name, "Session log", "log").await? else {
+        return Ok(None);
+    };
+    let file = files::open_for_write(&path, &protected_dirs(&app), true)?;
+    let shown = path.display().to_string();
+    state.0.start_log(session_id(id), file, shown.clone())?;
+    Ok(Some(shown))
+}
+
+#[tauri::command]
+fn pty_log_stop(state: State<PtyHandle>, id: u64) -> Result<Option<LogStatus>, String> {
+    state.0.stop_log(session_id(id))
+}
+
+#[tauri::command]
+fn print_page(window: tauri::WebviewWindow) -> Result<(), String> {
+    window.print().map_err(|e| e.to_string())
+}
+
+#[tauri::command]
 fn prefs_load(app: AppHandle) -> Result<prefs::Prefs, String> {
     prefs::load(&app)
 }
@@ -219,58 +326,64 @@ fn apply_window_effects(app: &tauri::App) -> Result<(), String> {
     Ok(())
 }
 
-fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
-    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem, Submenu};
-    let handle = app.handle();
-    let new_tab = MenuItem::with_id(handle, "term.new-tab", "New Tab", true, Some("CmdOrCtrl+T"))?;
-    let close_tab = MenuItem::with_id(
-        handle,
-        "term.close-tab",
-        "Close Tab",
-        true,
-        Some("CmdOrCtrl+W"),
-    )?;
-    let clear = MenuItem::with_id(
-        handle,
-        "term.clear",
-        "Clear Scrollback",
-        true,
-        Some("CmdOrCtrl+K"),
-    )?;
-    let interrupt = MenuItem::with_id(
-        handle,
-        "term.interrupt",
-        "Interrupt",
-        true,
-        Some("Ctrl+Shift+C"),
-    )?;
-    let prefs = MenuItem::with_id(
-        handle,
-        "term.prefs",
-        "Preferences…",
-        true,
-        Some("CmdOrCtrl+,"),
-    )?;
-    let find = MenuItem::with_id(handle, "term.find", "Find", true, Some("CmdOrCtrl+F"))?;
-    let explain = MenuItem::with_id(
-        handle,
-        "term.explain",
-        "Explain Selection",
-        true,
-        None::<&str>,
-    )?;
+fn item(
+    handle: &AppHandle,
+    id: &str,
+    label: &str,
+    accelerator: Option<&str>,
+) -> tauri::Result<tauri::menu::MenuItem<tauri::Wry>> {
+    tauri::menu::MenuItem::with_id(handle, id, label, true, accelerator)
+}
 
-    let shell = Submenu::with_id_and_items(
+/// Every custom item is routed to the webview as an "afterterm:menu" event with its id.
+/// Accelerators must match DEFAULT_BINDINGS in src/keybindings.ts (checked by npm test).
+fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+    let handle = app.handle();
+    let sep = || PredefinedMenuItem::separator(handle);
+
+    let about = PredefinedMenuItem::about(
         handle,
-        "shell",
-        "Shell",
+        Some("About AfterTerm"),
+        Some(AboutMetadata {
+            name: Some("AfterTerm".into()),
+            version: Some(env!("CARGO_PKG_VERSION").into()),
+            ..Default::default()
+        }),
+    )?;
+    let app_menu = Submenu::with_items(
+        handle,
+        "AfterTerm",
         true,
         &[
-            &new_tab,
-            &close_tab,
-            &PredefinedMenuItem::separator(handle)?,
-            &clear,
-            &interrupt,
+            &about,
+            &sep()?,
+            &item(handle, "app.prefs", "Preferences…", Some("CmdOrCtrl+,"))?,
+            &sep()?,
+            &PredefinedMenuItem::services(handle, None)?,
+            &sep()?,
+            &PredefinedMenuItem::hide(handle, None)?,
+            &PredefinedMenuItem::hide_others(handle, None)?,
+            &PredefinedMenuItem::show_all(handle, None)?,
+            &sep()?,
+            &PredefinedMenuItem::quit(handle, Some("Quit AfterTerm"))?,
+        ],
+    )?;
+    let file = Submenu::with_id_and_items(
+        handle,
+        "file",
+        "File",
+        true,
+        &[
+            &item(handle, "file.new-tab", "New Tab", Some("CmdOrCtrl+T"))?,
+            &item(handle, "file.close-tab", "Close Tab", Some("CmdOrCtrl+W"))?,
+            &sep()?,
+            &item(handle, "file.save-transcript", "Save Transcript…", Some("CmdOrCtrl+S"))?,
+            &item(handle, "file.save-selection", "Save Selection…", Some("CmdOrCtrl+Shift+S"))?,
+            &item(handle, "file.export-html", "Export Transcript as HTML…", Some("CmdOrCtrl+Alt+S"))?,
+            &item(handle, "file.log-session", "Log Session to File… (toggle)", Some("CmdOrCtrl+Shift+L"))?,
+            &sep()?,
+            &item(handle, "file.print", "Print Transcript…", Some("CmdOrCtrl+P"))?,
         ],
     )?;
     let edit = Submenu::with_id_and_items(
@@ -279,15 +392,64 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         "Edit",
         true,
         &[
-            &PredefinedMenuItem::copy(handle, None)?,
-            &PredefinedMenuItem::paste(handle, None)?,
-            &PredefinedMenuItem::select_all(handle, None)?,
-            &PredefinedMenuItem::separator(handle)?,
-            &find,
-            &explain,
+            &item(handle, "edit.cut", "Cut", Some("CmdOrCtrl+X"))?,
+            &item(handle, "edit.copy", "Copy", Some("CmdOrCtrl+C"))?,
+            &item(handle, "edit.paste", "Paste", Some("CmdOrCtrl+V"))?,
+            &item(handle, "edit.select-all", "Select All", Some("CmdOrCtrl+A"))?,
+            &item(handle, "edit.clear-selection", "Clear Selection", Some("CmdOrCtrl+Shift+A"))?,
+            &sep()?,
+            &item(handle, "edit.find", "Find…", Some("CmdOrCtrl+F"))?,
+            &item(handle, "edit.explain", "Explain Selection", Some("CmdOrCtrl+Shift+E"))?,
         ],
     )?;
-    let view = Submenu::with_id_and_items(handle, "view", "View", true, &[&prefs])?;
+    let signals = Submenu::with_id_and_items(
+        handle,
+        "shell.signals",
+        "Send Signal",
+        true,
+        &[
+            &item(handle, "shell.signal-int", "Interrupt (SIGINT)", None)?,
+            &item(handle, "shell.signal-tstp", "Suspend (SIGTSTP)", None)?,
+            &item(handle, "shell.signal-quit", "Quit (SIGQUIT)", None)?,
+            &item(handle, "shell.signal-hup", "Hang Up (SIGHUP)", None)?,
+            &item(handle, "shell.signal-term", "Terminate (SIGTERM)", None)?,
+        ],
+    )?;
+    let shell = Submenu::with_id_and_items(
+        handle,
+        "shell",
+        "Shell",
+        true,
+        &[
+            &item(handle, "shell.clear", "Clear Scrollback", Some("CmdOrCtrl+K"))?,
+            &item(handle, "shell.reset", "Reset Terminal (sends stty sane)", Some("CmdOrCtrl+Alt+R"))?,
+            &item(handle, "shell.stty-show", "Show Terminal Settings (sends stty -a)", None)?,
+            &sep()?,
+            &item(handle, "shell.interrupt", "Send Control-C", Some("Ctrl+Shift+C"))?,
+            &signals,
+            &sep()?,
+            &item(handle, "shell.toggle-review", "Toggle Submission Review", Some("CmdOrCtrl+Shift+R"))?,
+            &sep()?,
+            &item(handle, "shell.connect-sah", "Connect SAH…", Some("CmdOrCtrl+Shift+H"))?,
+            &item(handle, "shell.connect-console", "Connect Serial Console…", Some("CmdOrCtrl+Shift+O"))?,
+            &item(handle, "shell.ssh-compat", "SSH Compatibility…", Some("CmdOrCtrl+Shift+K"))?,
+        ],
+    )?;
+    let view = Submenu::with_id_and_items(
+        handle,
+        "view",
+        "View",
+        true,
+        &[
+            &item(handle, "view.session-info", "Session Info…", Some("CmdOrCtrl+I"))?,
+            &sep()?,
+            &item(handle, "view.font-larger", "Bigger Text", Some("CmdOrCtrl+="))?,
+            &item(handle, "view.font-smaller", "Smaller Text", Some("CmdOrCtrl+-"))?,
+            &item(handle, "view.font-reset", "Default Text Size", Some("CmdOrCtrl+0"))?,
+            &sep()?,
+            &item(handle, "view.prefs", "Preferences and Themes…", None)?,
+        ],
+    )?;
     let window = Submenu::with_id_and_items(
         handle,
         "window",
@@ -296,11 +458,12 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         &[
             &PredefinedMenuItem::minimize(handle, None)?,
             &PredefinedMenuItem::maximize(handle, None)?,
-            &PredefinedMenuItem::separator(handle)?,
-            &PredefinedMenuItem::close_window(handle, None)?,
+            &sep()?,
+            &item(handle, "window.next-tab", "Next Tab", Some("CmdOrCtrl+Shift+]"))?,
+            &item(handle, "window.prev-tab", "Previous Tab", Some("CmdOrCtrl+Shift+["))?,
         ],
     )?;
-    let menu = Menu::with_items(handle, &[&shell, &edit, &view, &window])?;
+    let menu = Menu::with_items(handle, &[&app_menu, &file, &edit, &shell, &view, &window])?;
     app.set_menu(menu)?;
     Ok(())
 }
@@ -344,6 +507,8 @@ fn run_gui(args: Vec<String>) {
             Ok(())
         })
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_dialog::init())
         .invoke_handler(tauri::generate_handler![
             launch_args,
             serial_ports,
@@ -367,6 +532,12 @@ fn run_gui(args: Vec<String>) {
             pty_attach,
             pty_review,
             pty_set_reviewed,
+            pty_info,
+            pty_signal,
+            pty_log_start,
+            pty_log_stop,
+            save_text_file,
+            print_page,
             prefs_load,
             prefs_save
         ])
@@ -420,6 +591,12 @@ mod registration_tests {
             "pty_attach",
             "pty_review",
             "pty_set_reviewed",
+            "pty_info",
+            "pty_signal",
+            "pty_log_start",
+            "pty_log_stop",
+            "save_text_file",
+            "print_page",
             "prefs_load",
             "prefs_save",
         ] {

@@ -260,3 +260,68 @@ export function withAlpha(theme: ITheme, transparency: number): ITheme {
   }
   return theme;
 }
+
+/** Named presets accepted in color fields, so colors can be chosen without a visual picker. */
+export const NAMED_COLORS: Record<string, string> = {
+  black: "#000000",
+  white: "#ffffff",
+  gray: "#808080",
+  silver: "#c0c0c0",
+  "dark gray": "#404040",
+  red: "#ff0000",
+  "dark red": "#8b0000",
+  orange: "#ffa500",
+  amber: "#e8b86d",
+  yellow: "#ffff00",
+  gold: "#ffd700",
+  green: "#008000",
+  lime: "#00ff00",
+  teal: "#008080",
+  cyan: "#00ffff",
+  blue: "#0000ff",
+  navy: "#000080",
+  "sky blue": "#87ceeb",
+  purple: "#800080",
+  magenta: "#ff00ff",
+  pink: "#ffc0cb",
+  brown: "#8b4513",
+  cream: "#f7f4ea",
+};
+
+/** Accept a color as typed: hex, rgba(), or a preset name. Returns the stored form or null. */
+export function parseColorInput(value: string): string | null {
+  const trimmed = value.trim();
+  const named = NAMED_COLORS[trimmed.toLowerCase().replace(/\s+/g, " ")];
+  if (named) return named;
+  return validColor(trimmed) ? trimmed : null;
+}
+
+function rgbOf(color: string): [number, number, number] | null {
+  const hex = /^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(color);
+  if (hex) {
+    const digits = hex[1].length === 3 ? hex[1].split("").map((d) => d + d).join("") : hex[1].slice(0, 6);
+    return [0, 2, 4].map((i) => parseInt(digits.slice(i, i + 2), 16)) as [number, number, number];
+  }
+  const rgba = /^rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})/.exec(color);
+  return rgba ? [Number(rgba[1]), Number(rgba[2]), Number(rgba[3])] : null;
+}
+
+/** Spoken description of a color: the nearest preset name, for people who cannot see the swatch. */
+export function describeColor(color: string): string {
+  const rgb = rgbOf(color);
+  if (!rgb) return "unknown color";
+  let best = "black";
+  let bestDistance = Infinity;
+  for (const [name, hex] of Object.entries(NAMED_COLORS)) {
+    const other = rgbOf(hex)!;
+    const distance = other.reduce((sum, part, i) => sum + (part - rgb[i]) ** 2, 0);
+    if (distance < bestDistance) { best = name; bestDistance = distance; }
+  }
+  return bestDistance === 0 ? best : `close to ${best}`;
+}
+
+/** "brightBlack" -> "Bright black", "selectionBackground" -> "Selection background". */
+export function colorLabel(key: string): string {
+  const words = key.replace(/([A-Z])/g, " $1").toLowerCase().trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+}
