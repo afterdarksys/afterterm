@@ -81,7 +81,7 @@ describe("keybindings and the menu bar agree", () => {
       assert.ok(!parts.includes("Mod"), `${chord} must name Ctrl explicitly`);
       if (/^[A-Z]$/.test(key)) assert.ok(parts.includes("Shift"), `${chord} would take Control+${key} from the shell`);
     }
-    for (const key of "ACDEPRSUWZ") {
+    for (const key of "ACDEGLNPRSUWZ") {
       const press = event({ key: key.toLowerCase(), code: `Key${key}`, ctrlKey: true });
       assert.equal(matchAction(press, OTHER_BINDINGS), null, `Ctrl+${key}`);
       assert.equal(terminalHandlesKey(press, OTHER_BINDINGS), true, `Ctrl+${key}`);
@@ -91,6 +91,49 @@ describe("keybindings and the menu bar agree", () => {
   it("matches Option and Shift chords by physical key", () => {
     assert.equal(matchAction(event({ key: "ß", code: "KeyS", metaKey: true, altKey: true })), isMacPlatform() ? "exportHtml" : null);
     assert.equal(chordMatches("Mod+Shift+]", event({ key: "}", code: "BracketRight", metaKey: true, shiftKey: true })), isMacPlatform());
+  });
+
+  it("matches arrow block chords", () => {
+    const up = event({ key: "ArrowUp", shiftKey: true, metaKey: true });
+    assert.equal(chordMatches("Mod+Shift+Up", up), isMacPlatform());
+    assert.equal(matchAction(up, DEFAULT_BINDINGS), isMacPlatform() ? "prevBlock" : null);
+    const otherUp = event({ key: "ArrowUp", ctrlKey: true, shiftKey: true });
+    assert.equal(chordMatches("Ctrl+Shift+Up", otherUp), true);
+    assert.equal(matchAction(otherUp, OTHER_BINDINGS), "prevBlock");
+    assert.equal(matchAction(event({ key: "ArrowDown", ctrlKey: true, shiftKey: true }), OTHER_BINDINGS), "nextBlock");
+  });
+
+  it("routes window, find-again, and view chords", () => {
+    if (isMacPlatform()) {
+      const mac = { metaKey: true };
+      assert.equal(matchAction(event({ key: "n", ...mac }), DEFAULT_BINDINGS), "newWindow");
+      assert.equal(matchAction(event({ key: "w", shiftKey: true, ...mac }), DEFAULT_BINDINGS), "closeWindow");
+      assert.equal(matchAction(event({ key: "g", ...mac }), DEFAULT_BINDINGS), "findNext");
+      assert.equal(matchAction(event({ key: "g", altKey: true, ...mac }), DEFAULT_BINDINGS), "findPrev");
+      assert.equal(matchAction(event({ key: "g", shiftKey: true, ...mac }), DEFAULT_BINDINGS), "explainBlock");
+      assert.equal(matchAction(event({ key: "l", ...mac }), DEFAULT_BINDINGS), "focusTerminal");
+      assert.equal(
+        matchAction(event({ key: "f", ctrlKey: true, ...mac }), DEFAULT_BINDINGS),
+        "toggleFullscreen",
+      );
+    }
+    // OTHER_BINDINGS name Ctrl explicitly, so they match the same way on every platform.
+    assert.equal(matchAction(event({ key: "N", code: "KeyN", ctrlKey: true, shiftKey: true }), OTHER_BINDINGS), "newWindow");
+    assert.equal(matchAction(event({ key: "n", code: "KeyN", ctrlKey: true }), OTHER_BINDINGS), null);
+    assert.equal(
+      matchAction(event({ key: "W", code: "KeyW", ctrlKey: true, shiftKey: true, altKey: true }), OTHER_BINDINGS),
+      "closeWindow",
+    );
+    assert.equal(
+      matchAction(event({ key: "G", code: "KeyG", ctrlKey: true, shiftKey: true, altKey: true }), OTHER_BINDINGS),
+      "findNext",
+    );
+    assert.equal(matchAction(event({ key: "F3", shiftKey: true }), OTHER_BINDINGS), "findPrev");
+    assert.equal(matchAction(event({ key: "F11" }), OTHER_BINDINGS), "toggleFullscreen");
+    assert.equal(
+      matchAction(event({ key: "L", code: "KeyL", ctrlKey: true, shiftKey: true, altKey: true }), OTHER_BINDINGS),
+      "focusTerminal",
+    );
   });
 
   it("routes the new edit and file actions on each platform", () => {

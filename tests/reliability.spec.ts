@@ -59,6 +59,9 @@ async function harness(page: Page, options: { delaySpawn?: boolean; delayAttach?
           case 'pty_info': return {id:args.id,title:'shell',program:'/bin/zsh',args:[],pid:4242,foreground_pgid:w.foreground ?? 4242,start_cwd:'/Users/test',cwd:'/tmp',rows:24,cols:80,started_at_ms:0,bytes_in:10,bytes_out:2048,exit:null,reviewed:false,log:w.logError ? {path:'/tmp/s.log',bytes:5,error:w.logError,active:false} : null};
           case 'pty_signal': return 'foreground process group 4242';
           case 'serial_ports': return [];
+          case 'workspace_load': return null;
+          case 'workspace_save': return;
+          case 'local_hostnames': return ['localhost', '127.0.0.1', '::1'];
           case 'plugin:clipboard-manager|read_text': return new Promise<string>(resolve => { w.resolveClipboard = resolve; });
           case 'plugin:clipboard-manager|write_text': w.copied = args.text; return;
           default: throw Error(`Unexpected native command ${command}`);
@@ -81,6 +84,28 @@ test('SAH launch arguments apply only to the initial tab', async ({page}) => {
   await page.getByRole('button', {name:'New tab', exact:true}).click();
   await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(2);
   expect((await calls(page, 'pty_spawn'))[1].args.sahArgs).toEqual([]);
+});
+
+test('SSH panel connects with a structured target and rejects option text', async ({page}) => {
+  await harness(page); await ready(page);
+  await page.getByRole('button', {name:'Connect SSH', exact:true}).click();
+  await page.getByLabel('SSH host').fill('web1 -o ProxyCommand=evil');
+  await expect(page.getByRole('button', {name:'Connect', exact:true})).toBeDisabled();
+  await page.getByLabel('SSH host').fill('web1; echo nope');
+  await expect(page.getByRole('button', {name:'Connect', exact:true})).toBeDisabled();
+  await page.getByLabel('SSH port').fill('0');
+  await page.getByLabel('SSH host').fill('web1');
+  await expect(page.getByRole('button', {name:'Connect', exact:true})).toBeDisabled();
+  await page.getByLabel('SSH user').fill('alice');
+  await page.getByLabel('SSH port').fill('2222');
+  await page.getByRole('button', {name:'Connect', exact:true}).click();
+  await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(2);
+  const spawned = (await calls(page, 'pty_spawn'))[1].args;
+  expect(spawned.sahArgs).toEqual([]);
+  expect(spawned.ssh).toEqual({ host: 'web1', user: 'alice', port: 2222 });
+  await page.getByRole('button', {name:'New tab', exact:true}).click();
+  await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(3);
+  expect((await calls(page, 'pty_spawn'))[2].args).toMatchObject({ sahArgs: [], ssh: { host: 'web1', user: 'alice', port: 2222 }, cwd: null });
 });
 
 test('SAH panel connects with literal host arguments and supports login', async ({page}) => {
@@ -445,4 +470,34 @@ test('paste into a text field honors maxLength and can be undone', async ({page}
   await page.evaluate(() => document.execCommand('undo'));
   await expect(field).toHaveValue('web');
   expect((await calls(page,'pty_write')).some((x:any)=>x.args.data.includes('123'))).toBe(false);
+});
+
+test('split, saved connection, and close warning', async ({page}) => {
+  const { mkdirSync } = await import('node:fs');
+  mkdirSync('/tmp/afterterm-look', { recursive: true });
+  await harness(page); await ready(page);
+  await menu(page, 'window.split-right');
+  await expect(page.locator('.stage.is-split-right')).toBeVisible();
+  await expect.poll(async () => (await calls(page, 'pty_spawn')).length).toBe(2);
+  await expect.poll(() => page.locator('.term-host.is-active').count()).toBe(1);
+  await expect.poll(() => page.locator('.term-host.is-shown').count()).toBe(1);
+  await menu(page, 'window.split-down');
+  await expect(status(page)).toContainText('Close the current split before opening another');
+  await page.screenshot({ path: '/tmp/afterterm-look/split.png' });
+  await page.getByRole('button', { name: 'Preferences' }).click();
+  await page.getByRole('heading', { name: 'Sessions' }).scrollIntoViewIfNeeded();
+  await page.screenshot({ path: '/tmp/afterterm-look/prefs-sessions.png' });
+  await page.keyboard.press('Escape');
+  await page.getByRole('button', { name: 'Connect SSH', exact: true }).click();
+  await page.getByLabel('SSH host').fill('web1');
+  await page.getByLabel('Connection name').fill('web');
+  await page.getByRole('button', { name: 'Save connection', exact: true }).click();
+  await expect(status(page)).toContainText('Saved connection');
+  await page.screenshot({ path: '/tmp/afterterm-look/saved-ssh.png' });
+  await page.keyboard.press('Escape');
+  await page.evaluate(() => { (window as any).foreground = 99; });
+  await page.getByRole('button', { name: 'Close shell' }).first().click();
+  await expect(page.getByRole('dialog', { name: 'Close this tab?' })).toBeVisible();
+  await page.screenshot({ path: '/tmp/afterterm-look/close-warning.png' });
+  await page.getByRole('button', { name: 'Cancel', exact: true }).click();
 });

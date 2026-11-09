@@ -304,6 +304,38 @@ fn pty_size(rows: u16, cols: u16) -> PtySize {
 fn lock_err(_: impl std::fmt::Debug) -> String {
     "pty state lock poisoned".into()
 }
+
+fn allowed_env_name(name: &str) -> bool {
+    if name == "ZDOTDIR" {
+        return true;
+    }
+    let Some(rest) = name.strip_prefix("AFTERTERM_") else {
+        return false;
+    };
+    !rest.is_empty()
+        && rest.bytes().all(|byte| byte.is_ascii_uppercase() || byte.is_ascii_digit() || byte == b'_')
+}
+
+fn validate_extra_env(env: &[(String, String)]) -> Result<(), String> {
+    if env.len() > 8 {
+        return Err("environment variable name is not allowed".into());
+    }
+    for (name, value) in env {
+        if !allowed_env_name(name) {
+            return Err("environment variable name is not allowed".into());
+        }
+        if value.is_empty() {
+            return Err("environment variable value is empty".into());
+        }
+        if value.len() > 4096 {
+            return Err("environment variable value is too long".into());
+        }
+        if value.chars().any(|c| c.is_control()) {
+            return Err("environment variable value contains a control character".into());
+        }
+    }
+    Ok(())
+}
 impl SessionManager {
     pub fn new(sink: Arc<dyn Sink>) -> Self {
         Self {
@@ -329,6 +361,19 @@ impl SessionManager {
 
     /// Spawn an executable with literal argv; never interpret arguments as shell text.
     pub fn spawn_with_args(&self, opts: SpawnOpts, args: &[String]) -> Result<SessionId, String> {
+        self.spawn_prepared(opts, args, &[])
+    }
+
+    /// Spawn with an allowlisted environment. `ZDOTDIR` and `AFTERTERM_*` only.
+    /// Validation runs before the working directory is checked, and a rejection
+    /// never includes the rejected value.
+    pub fn spawn_prepared(
+        &self,
+        opts: SpawnOpts,
+        args: &[String],
+        env: &[(String, String)],
+    ) -> Result<SessionId, String> {
+        validate_extra_env(env)?;
         let cwd = opts.cwd.unwrap_or_else(|| {
             std::env::var_os("HOME")
                 .map(PathBuf::from)
@@ -351,6 +396,9 @@ impl SessionManager {
             None => CommandBuilder::new_default_prog(),
         };
         cmd.args(args);
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
         cmd.env("PATH", augmented_path());
@@ -1234,5 +1282,62 @@ mod tests {
         state.observe(b"more\r\n\x1b[2");
         state.observe(b"01~");
         assert!(!state.open);
+    }
+
+    fn env_rejection(env: Vec<(String, String)>) -> String {
+        let collect = Arc::new(Collect {
+            output: Mutex::new(Vec::new()),
+            exits: Mutex::new(Vec::new()),
+        });
+        let manager = SessionManager::new(collect);
+        manager
+            .spawn_prepared(
+                SpawnOpts {
+                    rows: 24,
+                    cols: 80,
+                    cwd: Some(PathBuf::from("/no/such/SUPERSECRETFIXTURE")),
+                    program: None,
+                },
+                &[],
+                &env,
+            )
+            .unwrap_err()
+    }
+
+    #[test]
+    fn extra_env_is_allowlisted_before_spawn() {
+        let rejected = env_rejection(vec![("PATH".into(), "SUPERSECRETFIXTURE".into())]);
+        assert_eq!(rejected, "environment variable name is not allowed");
+        assert!(!rejected.contains("SUPERSECRETFIXTURE"));
+
+        let accepted = env_rejection(vec![("ZDOTDIR".into(), "/tmp/integration".into())]);
+        assert!(accepted.contains("working directory"), "{accepted}");
+
+        assert_eq!(
+            env_rejection(vec![("ZDOTDIR".into(), String::new())]),
+            "environment variable value is empty"
+        );
+        assert_eq!(
+            env_rejection(vec![("AFTERTERM_1".into(), "x".repeat(4097))]),
+            "environment variable value is too long"
+        );
+        for value in ["has\ttab", "has\u{7f}del", "has\nline"] {
+            assert_eq!(
+                env_rejection(vec![("ZDOTDIR".into(), value.into())]),
+                "environment variable value contains a control character"
+            );
+        }
+        assert_eq!(
+            env_rejection(vec![("AFTERTERM_".into(), "1".into())]),
+            "environment variable name is not allowed"
+        );
+        assert_eq!(
+            env_rejection(vec![("AFTERTERM_ok".into(), "1".into())]),
+            "environment variable name is not allowed"
+        );
+        let numbered = env_rejection(vec![("AFTERTERM_1".into(), "ok".into())]);
+        assert!(numbered.contains("working directory"), "{numbered}");
+        let too_many: Vec<_> = (0..9).map(|n| (format!("AFTERTERM_{n}"), "1".to_string())).collect();
+        assert_eq!(env_rejection(too_many), "environment variable name is not allowed");
     }
 }

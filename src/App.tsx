@@ -1,8 +1,30 @@
 import { SshPanel } from "./SshPanel.tsx";
+import { sshDestination, sshPort, type SshTarget } from "./ssh.ts";
+import {
+  cleanConnection,
+  closeInSplit,
+  closeNeedsConfirm,
+  connectionSaveError,
+  openSplit,
+  planNewTab,
+  restorePlan,
+  sanitizeConnections,
+  selectInSplit,
+  serialTitle,
+  snapshotWorkspace,
+  type SavedConnection,
+  type SpawnRemote,
+  type Split,
+  type TabOrigin,
+} from "./sessions.ts";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import { explainSelection } from "./ai.ts";
+import { INTEGRATION_SNIPPET, type BlockRecord } from "./blocks.ts";
+import { BlocksPanel } from "./BlocksPanel.tsx";
+import { DrivePanel } from "./DrivePanel.tsx";
 import { ConfirmDialog, type Challenge } from "./ConfirmDialog.tsx";
 import { FindBar } from "./FindBar.tsx";
 import { MENU_ACTIONS, matchAction, type Action } from "./keybindings.ts";
@@ -23,6 +45,8 @@ import { resolveTheme } from "./themes.ts";
 
 type Review = { id: number; challenge: Challenge; transport: "pty" | "serial" };
 const reviewKey = (review: Review) => `${review.transport}:${review.id}:${review.challenge.request_id}`;
+const PREVIEW_CONNECTION_ID = "00000000-0000-4000-8000-000000000000";
+const HOSTNAME_FALLBACK = ["localhost", "127.0.0.1", "::1"];
 
 let tabSeq = 2;
 
@@ -38,10 +62,17 @@ export default function App() {
   const [prefs, setPrefs] = useState<Prefs>(DEFAULT_PREFS);
   const [paste, setPaste] = useState<{ id: number; text: string; config: ConsoleConfig } | null>(null);
   const [sshOpen, setSshOpen] = useState(false);
+  const [sshConnectOpen, setSshConnectOpen] = useState(false);
+  const [sshUser, setSshUser] = useState("");
+  const [sshHost, setSshHost] = useState("");
+  const [sshPortText, setSshPortText] = useState("");
   const [sahOpen, setSahOpen] = useState(false);
   const [sahHost, setSahHost] = useState("");
   const [consoleOpen, setConsoleOpen] = useState(false);
   const [prefsOpen, setPrefsOpen] = useState(false);
+  const [blocksOpen, setBlocksOpen] = useState(false);
+  const [driveOpen, setDriveOpen] = useState(false);
+  const [blocksBySession, setBlocksBySession] = useState<Record<number, { blocks: BlockRecord[]; selectedId: string | null }>>({});
   const [sessionOpen, setSessionOpen] = useState(false);
   const [printText, setPrintText] = useState("");
   const [commandRequest, setCommandRequest] = useState<{ key: string; sessionId: number; command: string; done: string; before?: () => void; group: number | null } | null>(null);
@@ -65,18 +96,102 @@ export default function App() {
   const prefsRef = useRef(prefs);
   prefsRef.current = prefs;
   const handleMenuRef = useRef<(id: string) => void>(() => undefined);
+  const splitRef = useRef<Split | null>(null);
+  const [split, setSplit] = useState<Split | null>(null);
+  const [closeAsk, setCloseAsk] = useState<{ key: string; sessionId: number } | null>(null);
+  const [hostnames, setHostnames] = useState<string[]>(HOSTNAME_FALLBACK);
+  const hostnamesRef = useRef(hostnames);
+  hostnamesRef.current = hostnames;
+  const [booted, setBooted] = useState(() => !isTauri());
+  const allowLaunchArgs = useRef(true);
+  const workspaceWarned = useRef(false);
+  const finishedCounts = useRef(new Map<number, number>());
+  const openSerialRef = useRef<(key: string, config: ConsoleConfig, exitSplit: boolean) => Promise<boolean>>(async () => false);
+  const dropTabRef = useRef<(key: string) => void>(() => undefined);
 
   const activeTab = tabs.find((tab) => tab.key === activeKey) ?? tabs[0];
   const theme = resolveTheme(prefs.theme, prefs.themeOverrides[prefs.theme]);
 
   const prefsWarning = useRef("");
   const spawning = useRef(new Set<string>());
-  const spawnFor = useCallback(async (key: string, cwd?: string, sahArgs?: string[]) => {
-    if (!isTauri() || spawning.current.has(key)) return;
+
+  function commitTabs(map: (current: Tab[]) => Tab[]): void {
+    setTabs((current) => {
+      const mapped = map(current);
+      if (mapped === current) return current;
+      const live = liveTabs.current;
+      const next = mapped.filter((tab) => live.has(tab.key));
+      const have = new Set(next.map((tab) => tab.key));
+      for (const tab of tabsRef.current) {
+        if (live.has(tab.key) && !have.has(tab.key)) {
+          next.push(tab);
+          have.add(tab.key);
+        }
+      }
+      tabsRef.current = next;
+      return next;
+    });
+  }
+
+  function applySplit(next: Split | null) {
+    splitRef.current = next;
+    setSplit(next);
+  }
+
+  function focusKey(key: string) {
+    activeRef.current = key;
+    setActiveKey(key);
+  }
+
+  /** Insert before an await. The sync write lets a close in the same gap see the tab. */
+  function insertTab(tab: Tab) {
+    liveTabs.current.add(tab.key);
+    if (!tabsRef.current.some((item) => item.key === tab.key)) tabsRef.current = [...tabsRef.current, tab];
+    setTabs((previous) => {
+      const live = liveTabs.current;
+      const next = previous.filter((item) => live.has(item.key));
+      if (!next.some((item) => item.key === tab.key) && live.has(tab.key)) next.push(tab);
+      const have = new Set(next.map((item) => item.key));
+      for (const extra of tabsRef.current) {
+        if (live.has(extra.key) && !have.has(extra.key)) {
+          next.push(extra);
+          have.add(extra.key);
+        }
+      }
+      tabsRef.current = next;
+      return next;
+    });
+  }
+
+  async function planFrom(source: Tab | undefined) {
+    const follow = prefsRef.current.newTabDirectory;
+    const serial = source?.transport === "serial" || source?.origin?.kind === "serial";
+    const origin = serial ? { kind: "serial" as const } : source?.origin ?? { kind: "local" as const };
+    if (serial || origin.kind === "sah" || !follow || origin.kind === "ssh") return planNewTab({ origin, follow });
+    if (typeof source?.reportedCwd === "string") return planNewTab({ origin, follow, reportedCwd: source.reportedCwd });
+    if (source?.sessionId != null && isTauri()) {
+      try {
+        const info = await invoke<SessionDetails>("pty_info", { id: source.sessionId });
+        return planNewTab({ origin, follow, ptyCwd: info.cwd });
+      } catch {
+        return planNewTab({ origin, follow });
+      }
+    }
+    return planNewTab({ origin, follow });
+  }
+
+  const spawnFor = useCallback(async (key: string, cwd?: string, remote?: SpawnRemote, note?: string | null) => {
+    if (!isTauri() || spawning.current.has(key) || !liveTabs.current.has(key)) return;
     spawning.current.add(key);
     try {
-      const args = sahArgs ?? (key === "tab-1" ? await invoke<string[]>("launch_args") : []);
-      const id = await invoke<number>("pty_spawn", { rows: 24, cols: 80, cwd: cwd ?? null, sahArgs: args });
+      const sahArgs = remote?.kind === "sah" ? remote.args : remote?.kind === "ssh" ? [] : key === "tab-1" && allowLaunchArgs.current ? await invoke<string[]>("launch_args") : [];
+      if (!liveTabs.current.has(key)) return;
+      const ssh = remote?.kind === "ssh" ? remote.target : null;
+      const local = remote?.kind !== "ssh" && !(remote?.kind === "sah" || sahArgs.length > 0);
+      const origin: TabOrigin = remote?.kind === "ssh" ? { kind: "ssh", target: remote.target } : remote?.kind === "sah" || sahArgs.length ? { kind: "sah" } : { kind: "local" };
+      const spawnCwd = local ? (cwd ?? null) : null;
+      commitTabs((current) => current.map((tab) => tab.key === key ? { ...tab, origin, spawnCwd } : tab));
+      const id = await invoke<number>("pty_spawn", { rows: 24, cols: 80, cwd: spawnCwd, sahArgs, ssh });
       if (!liveTabs.current.has(key)) { await invoke("pty_kill", { id }); return; }
       const reviewed = prefsRef.current.reviewNewTabs;
       if (reviewed) {
@@ -84,38 +199,130 @@ export default function App() {
         try { await invoke("pty_set_reviewed", { id, reviewed: true, typed: null }); }
         catch (error) { await invoke("pty_kill", { id }).catch(() => undefined); throw error; }
       }
-      setTabs((current) =>
-        current.map((tab) => (tab.key === key ? { ...tab, title: args.length ? "SAH" : tab.title, sessionId: id, status: "starting", reviewed } : tab)),
-      );
-      setStatus(`${args.length ? "SAH client started; remote target identity is not verified by AfterTerm" : "Shell ready"}${reviewed ? "; submission review on" : ""}${prefsWarning.current ? `. ${prefsWarning.current}` : ""}`);
+      const title = remote?.kind === "ssh" ? remote.title : sahArgs.length && !remote ? "SAH" : null;
+      const started = remote?.kind === "ssh"
+        ? "OpenSSH client started; remote target identity is not verified by AfterTerm"
+        : sahArgs.length
+          ? "SAH client started; remote target identity is not verified by AfterTerm"
+          : "Shell ready";
+      commitTabs((current) => current.map((tab) => tab.key === key ? { ...tab, title: title ?? tab.title, sessionId: id, status: "starting", reviewed } : tab));
+      setStatus(`${started}${note ? `. ${note}` : ""}${reviewed ? "; submission review on" : ""}${prefsWarning.current ? `. ${prefsWarning.current}` : ""}`);
       prefsWarning.current = "";
     } catch (error) {
-      setTabs((current) =>
-        current.map((tab) => (tab.key === key ? { ...tab, status: "error" } : tab)),
-      );
+      commitTabs((current) => current.map((tab) => tab.key === key ? { ...tab, status: "error" } : tab));
       setStatus(`Could not start shell: ${String(error)}`);
     } finally { spawning.current.delete(key); }
   }, []);
 
   useEffect(() => {
     if (!isTauri()) return;
-    // The first tab waits for preferences so "start new tabs reviewed" applies to it too.
-    void invoke("prefs_load")
-      .then((wire) => {
+    let cancel = false;
+    const boot = async () => {
+      // The first await is hostnames, so a StrictMode remount cancels this pass before it creates tabs.
+      try {
+        const names = await invoke<unknown>("local_hostnames");
+        if (cancel) return;
+        const merged = Array.from(new Set(
+          [...(Array.isArray(names) ? names : []), ...HOSTNAME_FALLBACK].filter((item): item is string => typeof item === "string" && item.length > 0),
+        ));
+        hostnamesRef.current = merged;
+        setHostnames(merged);
+      } catch {
+        /* keep the fallback hostnames and do not change the status line */
+      }
+      if (cancel) return;
+      try {
+        const wire = await invoke("prefs_load");
+        if (cancel) return;
         const loaded = fromWire(wire as Parameters<typeof fromWire>[0]);
         prefsRef.current = loaded;
         setPrefs(loaded);
-      })
-      .catch((error) => {
+      } catch (error) {
+        if (cancel) return;
         // Kept until the first tab announces "Shell ready", which would otherwise replace it.
         prefsWarning.current = `Preferences could not be read (${String(error)}); defaults in use, so submission review is off for new tabs`;
         setStatus(prefsWarning.current);
-      })
-      .finally(() => {
-        const first = tabsRef.current[0];
-        if (first && first.sessionId === null) void spawnFor(first.key);
-      });
+      }
+      if (cancel) return;
+      const restore = prefsRef.current.restoreSessions;
+      let file: unknown = null;
+      if (restore !== "off") {
+        try { file = await invoke("workspace_load"); } catch { file = null; }
+      }
+      if (cancel) return;
+      const plan = restore === "off" ? null : restorePlan(file, restore);
+      const placeholder = tabsRef.current;
+      const canReplace = placeholder.length === 1 && placeholder[0]?.key === "tab-1" && placeholder[0].sessionId == null && !spawning.current.has("tab-1");
+      if (plan && canReplace) {
+        allowLaunchArgs.current = false;
+        const restored: Tab[] = plan.tabs.map((session, index) => ({
+          key: index === 0 ? "tab-1" : `tab-${tabSeq++}`,
+          sessionId: null,
+          title: session.title,
+          status: "starting" as const,
+          origin: session.kind === "ssh" && session.ssh
+            ? { kind: "ssh" as const, target: session.ssh.target }
+            : session.kind === "serial" ? { kind: "serial" as const } : { kind: "local" as const },
+          consoleConfig: session.config ?? undefined,
+          transport: session.kind === "serial" ? "serial" as const : undefined,
+          spawnCwd: session.kind === "local" ? session.cwd : null,
+        }));
+        const active = restored[plan.active]?.key ?? restored[0].key;
+        let nextSplit: Split | null = null;
+        if (plan.split) {
+          const left = restored[plan.split.index[0]];
+          const right = restored[plan.split.index[1]];
+          if (left && right && left.key !== right.key) {
+            const focus: 0 | 1 = right.key === active ? 1 : left.key === active ? 0 : plan.split.focus;
+            nextSplit = { orientation: plan.split.orientation, keys: [left.key, right.key], focus };
+          }
+        }
+        liveTabs.current = new Set(restored.map((tab) => tab.key));
+        tabsRef.current = restored;
+        activeRef.current = active;
+        splitRef.current = nextSplit;
+        setTabs(restored);
+        setActiveKey(active);
+        setSplit(nextSplit);
+        setBooted(true);
+        for (const tab of restored) {
+          const session = plan.tabs[restored.indexOf(tab)];
+          if (session.kind === "serial" && session.config) {
+            void openSerialRef.current(tab.key, session.config, false).catch((error) => {
+              setStatus(String(error));
+              if (liveTabs.current.has(tab.key) && tabsRef.current.find((item) => item.key === tab.key)?.sessionId == null) dropTabRef.current(tab.key);
+            });
+          } else if (session.kind === "ssh" && session.ssh) {
+            void spawnFor(tab.key, undefined, { kind: "ssh", target: session.ssh.target, title: session.ssh.title });
+          } else void spawnFor(tab.key, session.cwd ?? undefined);
+        }
+        return;
+      }
+      setBooted(true);
+      for (const tab of tabsRef.current) {
+        if (tab.sessionId == null && liveTabs.current.has(tab.key)) void spawnFor(tab.key);
+      }
+    };
+    void boot();
+    return () => { cancel = true; };
   }, [spawnFor]);
+
+  useEffect(() => {
+    if (!booted || !isTauri()) return;
+    const timer = window.setTimeout(() => {
+      const workspace = snapshotWorkspace({
+        tabs: tabsRef.current,
+        activeKey: activeRef.current,
+        split: splitRef.current,
+      });
+      void invoke("workspace_save", { workspace }).catch(() => {
+        if (workspaceWarned.current) return;
+        workspaceWarned.current = true;
+        setStatus("Workspace could not be saved");
+      });
+    }, 400);
+    return () => window.clearTimeout(timer);
+  }, [tabs, split, activeKey, booted]);
 
   const enqueueReview = (review: Review) => {
     if (review.challenge.request_id <= (settledReviews.current.get(`${review.transport}:${review.id}`) ?? 0)) return;
@@ -153,18 +360,18 @@ export default function App() {
     confirming.current.add("mode"); setReviewBusy(true); setReviewError("");
     try {
       await invoke("pty_set_reviewed", { id, reviewed, typed: answer });
-      setTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed } : tab));
+      commitTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed } : tab));
       setModeRequest(null);
       return true;
     } catch (error) {
       setReviewError(String(error)); setStatus(String(error));
       try {
         const snapshot = await invoke<{ reviewed: boolean }>("pty_attach", { id });
-        setTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed: snapshot.reviewed } : tab));
+        commitTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed: snapshot.reviewed } : tab));
         if (snapshot.reviewed === reviewed) setModeRequest(null);
         return snapshot.reviewed === reviewed;
       } catch {
-        setTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed: undefined } : tab));
+        commitTabs((current) => current.map((tab) => tab.key === key && tab.sessionId === id ? { ...tab, reviewed: undefined } : tab));
         setStatus("Review state unknown; reconnect or close this session before relying on review");
         return false;
       }
@@ -181,7 +388,7 @@ export default function App() {
       listen<{ id: number; code: number }>("pty:exit", (event) => {
         setReviews((current) => current.filter((item) => item.transport !== "pty" || item.id !== event.payload.id));
         setModeRequest((request) => request?.id === event.payload.id ? null : request);
-        setTabs((current) =>
+        commitTabs((current) =>
           current.map((tab) =>
             tab.transport !== "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab,
           ),
@@ -189,7 +396,7 @@ export default function App() {
       }),
       listen<{ id: number; code: number }>("serial:exit", (event) => {
         setReviews((current) => current.filter((item) => item.transport !== "serial" || item.id !== event.payload.id));
-        setTabs((current) => current.map((tab) => tab.transport === "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab));
+        commitTabs((current) => current.map((tab) => tab.transport === "serial" && tab.sessionId === event.payload.id ? { ...tab, status: "exited" } : tab));
       }),
       listen<string>("afterterm:menu", (event) => {
         handleMenuRef.current(event.payload);
@@ -211,17 +418,22 @@ export default function App() {
   }, [theme]);
 
   const persistPrefs = (next: Prefs) => {
+    prefsRef.current = next;
     setPrefs(next);
     if (isTauri()) void invoke("prefs_save", { prefs: toWire(next) }).catch((error) => setStatus(`Preferences could not be saved: ${String(error)}`));
   };
 
   const connectConsole = async (config: ConsoleConfig) => {
-    const id = await invoke<number>("serial_open", { config });
-    const tab: Tab = { ...newTab(`${config.path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}`), transport: "serial", consoleConfig: config, sessionId: id, status: "running" };
-    liveTabs.current.add(tab.key);
-    setTabs((current) => [...current, tab]);
-    setActiveKey(tab.key);
-    setStatus("Console connected");
+    const tab = newTab(serialTitle(config));
+    insertTab(tab);
+    focusKey(tab.key);
+    try {
+      const opened = await openSerial(tab.key, config, true);
+      if (opened) setStatus("Console connected");
+    } catch (error) {
+      if (liveTabs.current.has(tab.key) && tabsRef.current.find((item) => item.key === tab.key)?.sessionId == null) dropTab(tab.key);
+      throw error;
+    }
   };
 
   const reconnecting = useRef(new Set<string>());
@@ -238,7 +450,7 @@ export default function App() {
       const config = { ...tab.consoleConfig, path };
       const id = await invoke<number>("serial_open", { config });
       if (!liveTabs.current.has(tab.key)) { await invoke("serial_close", { id }); return; }
-      setTabs((current) => current.map((t) => t.key === tab.key ? { ...t, sessionId: id, consoleConfig: config, status: "running", title: `${path.split("/").pop()} · ${config.baud}${config.production ? " · prod" : ""}` } : t));
+      commitTabs((current) => current.map((t) => t.key === tab.key ? { ...t, sessionId: id, consoleConfig: config, status: "running", origin: { kind: "serial" }, transport: "serial", title: serialTitle(config) } : t));
       setStatus(`Console reconnected: ${path}`);
     } catch (error) { if (!automatic) setStatus(String(error)); }
     finally { reconnecting.current.delete(tab.key); }
@@ -259,40 +471,232 @@ export default function App() {
   const activePane = () => panes.current.get(activeRef.current) ?? null;
 
   const addTab = useCallback(() => {
+    const source = tabsRef.current.find((tab) => tab.key === activeRef.current);
     const tab = newTab();
-    liveTabs.current.add(tab.key);
-    setTabs((current) => [...current, tab]);
-    setActiveKey(tab.key);
-    void spawnFor(tab.key);
+    applySplit(null);
+    insertTab(tab);
+    focusKey(tab.key);
+    void (async () => {
+      const plan = await planFrom(source);
+      if (!liveTabs.current.has(tab.key)) return;
+      void spawnFor(tab.key, plan.cwd ?? undefined, plan.remote ?? undefined, plan.note);
+    })();
   }, [spawnFor]);
 
   const closeTab = useCallback((key: string) => {
+    if (!liveTabs.current.has(key)) return;
     liveTabs.current.delete(key);
-    const current = tabsRef.current;
-    const tab = current.find((item) => item.key === key);
+    const tab = tabsRef.current.find((item) => item.key === key);
     if (tab?.sessionId != null && isTauri()) void invoke(tab.transport === "serial" ? "serial_close" : "pty_kill", { id: tab.sessionId }).catch((error) => setStatus(String(error)));
-    if (tab?.sessionId != null) setReviews((items) => items.filter((item) => item.id !== tab.sessionId || item.transport !== (tab.transport ?? "pty")));
+    if (tab?.sessionId != null) {
+      const id = tab.sessionId;
+      setReviews((items) => items.filter((item) => item.id !== id || item.transport !== (tab.transport ?? "pty")));
+      setBlocksBySession((blocks) => {
+        if (!(id in blocks)) return blocks;
+        const next = { ...blocks };
+        delete next[id];
+        return next;
+      });
+    }
     setModeRequest((request) => request?.key === key ? null : request);
+    setCloseAsk((ask) => ask?.key === key ? null : ask);
     if (tab) setStatus(`Closed ${tab.title}`);
-    const remaining = current.filter((item) => item.key !== key);
+    const closed = closeInSplit(splitRef.current, key);
+    applySplit(closed.split);
+    const remaining = tabsRef.current.filter((item) => liveTabs.current.has(item.key));
     if (remaining.length === 0) {
       const fresh = newTab();
       liveTabs.current.add(fresh.key);
+      tabsRef.current = [fresh];
+      activeRef.current = fresh.key;
+      applySplit(null);
       setTabs([fresh]);
       setActiveKey(fresh.key);
       void spawnFor(fresh.key);
       return;
     }
-    setTabs(remaining);
-    if (activeRef.current === key) setActiveKey(remaining[remaining.length - 1].key);
+    tabsRef.current = remaining;
+    const nextActive = closed.focusKey ?? (activeRef.current === key ? remaining[remaining.length - 1].key : null);
+    if (nextActive) {
+      activeRef.current = nextActive;
+      setActiveKey(nextActive);
+    }
+    commitTabs((items) => items.filter((item) => liveTabs.current.has(item.key)));
   }, [spawnFor]);
+
+  function dropTab(key: string) {
+    if (!liveTabs.current.has(key)) return;
+    liveTabs.current.delete(key);
+    const closed = closeInSplit(splitRef.current, key);
+    applySplit(closed.split);
+    const remaining = tabsRef.current.filter((item) => liveTabs.current.has(item.key));
+    if (remaining.length === 0) {
+      const fresh = newTab();
+      liveTabs.current.add(fresh.key);
+      tabsRef.current = [fresh];
+      activeRef.current = fresh.key;
+      applySplit(null);
+      setTabs([fresh]);
+      setActiveKey(fresh.key);
+      void spawnFor(fresh.key);
+      return;
+    }
+    tabsRef.current = remaining;
+    const nextActive = closed.focusKey ?? (activeRef.current === key ? remaining[remaining.length - 1].key : null);
+    if (nextActive) {
+      activeRef.current = nextActive;
+      setActiveKey(nextActive);
+    }
+    commitTabs((items) => items.filter((item) => liveTabs.current.has(item.key)));
+  }
+  dropTabRef.current = dropTab;
+
+  async function openSerial(key: string, config: ConsoleConfig, exitSplit: boolean): Promise<boolean> {
+    const origin: TabOrigin = { kind: "serial" };
+    tabsRef.current = tabsRef.current.map((tab) => tab.key === key ? { ...tab, origin, transport: "serial", consoleConfig: config } : tab);
+    setTabs((current) => {
+      const live = liveTabs.current;
+      const next = current.filter((tab) => live.has(tab.key)).map((tab) => tab.key === key ? { ...tab, origin, transport: "serial" as const, consoleConfig: config } : tab);
+      const have = new Set(next.map((tab) => tab.key));
+      for (const tab of tabsRef.current) {
+        if (live.has(tab.key) && !have.has(tab.key)) {
+          next.push(tab);
+          have.add(tab.key);
+        }
+      }
+      tabsRef.current = next;
+      return next;
+    });
+    const id = await invoke<number>("serial_open", { config });
+    if (!liveTabs.current.has(key)) {
+      await invoke("serial_close", { id });
+      return false;
+    }
+    commitTabs((current) => current.map((tab) => tab.key === key ? { ...tab, sessionId: id, status: "running", transport: "serial", consoleConfig: config, origin, title: serialTitle(config) } : tab));
+    if (exitSplit) applySplit(null);
+    return true;
+  }
+  openSerialRef.current = openSerial;
+
+  const requestClose = (key: string) => {
+    const tab = tabsRef.current.find((item) => item.key === key);
+    if (!tab || !liveTabs.current.has(key)) return;
+    if (!prefsRef.current.confirmCloseBusy || tab.status === "exited" || tab.status === "error" || tab.sessionId == null) {
+      closeTab(key);
+      return;
+    }
+    const serial = tab.transport === "serial" || tab.origin?.kind === "serial";
+    if (!isTauri() && !serial) {
+      closeTab(key);
+      return;
+    }
+    if (serial && (tab.status === "running" || tab.status === "starting")) {
+      setCloseAsk({ key, sessionId: tab.sessionId });
+      return;
+    }
+    const sessionId = tab.sessionId;
+    void (async () => {
+      let info: { ok: true; pid: number | null; foreground_pgid: number | null } | { ok: false };
+      try {
+        const details = await invoke<SessionDetails>("pty_info", { id: sessionId });
+        info = { ok: true, pid: details.pid, foreground_pgid: details.foreground_pgid };
+      } catch {
+        info = { ok: false };
+      }
+      if (!liveTabs.current.has(key)) return;
+      const latest = tabsRef.current.find((item) => item.key === key);
+      if (!latest || latest.sessionId !== sessionId) return;
+      const ask = closeNeedsConfirm({
+        confirm: prefsRef.current.confirmCloseBusy,
+        hasSession: true,
+        status: latest.status,
+        serial: latest.transport === "serial" || latest.origin?.kind === "serial",
+        info,
+      });
+      if (ask) setCloseAsk({ key, sessionId });
+      else closeTab(key);
+    })();
+  };
+
+  const selectTab = (key: string) => {
+    if (splitRef.current) applySplit(selectInSplit(splitRef.current, key));
+    const chosen = tabsRef.current.find((item) => item.key === key);
+    if (chosen?.attention) {
+      commitTabs((current) => {
+        const target = current.find((item) => item.key === key);
+        if (!target?.attention) return current;
+        return current.map((item) => item.key === key ? { ...item, attention: false } : item);
+      });
+    }
+    const already = activeRef.current === key;
+    focusKey(key);
+    if (already) document.querySelector<HTMLElement>(".term-host.is-active .xterm-helper-textarea")?.focus();
+  };
 
   const cycle = (delta: number) => {
     const current = tabsRef.current;
     const index = current.findIndex((tab) => tab.key === activeRef.current);
     const next = current[(index + delta + current.length) % current.length];
-    if (next) setActiveKey(next.key);
+    if (next) selectTab(next.key);
   };
+
+  const splitToward = async (orientation: "right" | "down") => {
+    const sourceKey = activeRef.current;
+    const source = tabsRef.current.find((tab) => tab.key === sourceKey);
+    if (!source) return;
+    const tab = newTab();
+    const opened = openSplit(splitRef.current, orientation, sourceKey, tab.key);
+    if (opened.error) {
+      setStatus(opened.error);
+      return;
+    }
+    applySplit(opened.split);
+    insertTab(tab);
+    focusKey(tab.key);
+    const plan = await planFrom(source);
+    if (!liveTabs.current.has(tab.key)) return;
+    if (!liveTabs.current.has(sourceKey)) {
+      // closeTab already cleared the split. Leave it cleared and still start the new tab.
+    }
+    void spawnFor(tab.key, plan.cwd ?? undefined, plan.remote ?? undefined, plan.note);
+  };
+
+  const focusOtherPane = () => {
+    const current = splitRef.current;
+    if (!current) { setStatus("No split is open"); return; }
+    selectTab(current.keys[current.focus === 0 ? 1 : 0]);
+  };
+
+  function openSessionTab(title: string, remote: SpawnRemote) {
+    const tab = newTab(title);
+    applySplit(null);
+    insertTab(tab);
+    focusKey(tab.key);
+    void spawnFor(tab.key, undefined, remote);
+  }
+
+  function saveConnection(candidate: SavedConnection) {
+    const error = connectionSaveError(prefsRef.current.connections, candidate);
+    if (error) { setStatus(error); return; }
+    const clean = cleanConnection(candidate);
+    if (!clean) { setStatus("Saved connection is not valid"); return; }
+    persistPrefs({ ...prefsRef.current, connections: sanitizeConnections([...prefsRef.current.connections, clean]) });
+    setStatus("Saved connection");
+  }
+
+  function noteAttention(key: string, reason: "bell" | "finished") {
+    if (key === activeRef.current) return;
+    if (prefsRef.current.markBackgroundTabs) {
+      commitTabs((current) => {
+        const tab = current.find((item) => item.key === key);
+        if (!tab || tab.attention) return current;
+        return current.map((item) => item.key === key ? { ...item, attention: true } : item);
+      });
+    }
+    if (!prefsRef.current.notifySystem) return;
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    try { new Notification("AfterTerm", { body: reason === "bell" ? "Bell" : "A command finished" }); } catch { /* the constructor can throw when notifications are unavailable */ }
+  }
 
   const runExplain = async () => {
     const selection = activePane()?.getSelection() ?? "";
@@ -505,14 +909,51 @@ export default function App() {
     else { setTyped(""); setReviewError(""); setModeRequest({ id: tab.sessionId, key: tab.key }); }
   };
 
-  const openPanel = (panel: "prefs" | "console" | "ssh" | "sah" | "session") => {
+  const openPanel = (panel: "prefs" | "console" | "ssh" | "sah" | "session" | "ssh-connect" | "blocks" | "drive") => {
     setPrefsOpen(panel === "prefs"); setConsoleOpen(panel === "console"); setSshOpen(panel === "ssh");
-    setSahOpen(panel === "sah"); setSessionOpen(panel === "session");
+    setSahOpen(panel === "sah"); setSessionOpen(panel === "session"); setSshConnectOpen(panel === "ssh-connect");
+    setBlocksOpen(panel === "blocks"); setDriveOpen(panel === "drive");
+  };
+
+  const copyBlockPart = async (part: "command" | "output" | "block") => {
+    const text = activePane()?.blockText(part) ?? "";
+    if (!text) { setStatus("No block is selected"); return; }
+    await writeClipboard(text);
+    setStatus(part === "command" ? "Copied command" : part === "output" ? "Copied output" : "Copied block");
+  };
+
+  const explainBlock = async () => {
+    const text = activePane()?.blockText("block") ?? "";
+    if (!text) { setStatus("No block is selected"); return; }
+    const result = await explainSelection(text, prefsRef.current.aiEnabled);
+    setStatus(result.ok ? result.text : result.reason);
+  };
+
+  const flipDisplay = (
+    key: "blocksShowExit" | "blocksShowDuration" | "blocksShowTimestamps" | "blocksGutter" | "blocksShellIntegration",
+    on: string,
+    off: string,
+  ) => {
+    const next = !prefsRef.current[key];
+    persistPrefs({ ...prefsRef.current, [key]: next });
+    setStatus(next ? on : off);
   };
 
   const fontSize = (size: number) => {
     persistPrefs({ ...prefsRef.current, fontSize: Math.min(22, Math.max(10, size)) });
     setStatus(`Font size ${Math.min(22, Math.max(10, size))} points`);
+  };
+
+  // Find again uses the text already in the find bar. An empty query only opens the bar.
+  const searchAgain = (forward: boolean) => {
+    setFindOpen(true);
+    const pane = activePane();
+    if (findQuery === "" || !pane) {
+      setStatus("Nothing to find");
+      return;
+    }
+    if (forward) pane.findNext(findQuery);
+    else pane.findPrev(findQuery);
   };
 
   const runAction = async (action: Action) => {
@@ -521,7 +962,21 @@ export default function App() {
     const pane = activePane();
     switch (action) {
       case "newTab": return addTab();
-      case "closeTab": return closeTab(activeRef.current);
+      case "newWindow": {
+        if (!isTauri()) { setStatus("A new window needs the desktop app"); return; }
+        await invoke("open_window");
+        setStatus("Opened a window");
+        return;
+      }
+      case "closeTab": return requestClose(activeRef.current);
+      case "splitRight": return splitToward("right");
+      case "splitDown": return splitToward("down");
+      case "focusOtherPane": return focusOtherPane();
+      case "closeWindow": {
+        if (!isTauri()) { setStatus("Closing a window needs the desktop app"); return; }
+        await getCurrentWindow().close();
+        return;
+      }
       case "nextTab": return cycle(1);
       case "prevTab": return cycle(-1);
       case "copy": return copySelection(false);
@@ -530,18 +985,47 @@ export default function App() {
       case "selectAll": pane?.selectAll(); setStatus("Selected all terminal text"); return;
       case "clearSelection": pane?.clearSelection(); setStatus("Selection cleared"); return;
       case "find": setFindOpen(true); return;
+      case "findNext": return searchAgain(true);
+      case "findPrev": return searchAgain(false);
       case "prefs": return prefsOpen ? setPrefsOpen(false) : openPanel("prefs");
       case "clear": pane?.clear(); setStatus("Scrollback cleared"); return;
       case "resetTerminal": return resetTerminal();
       case "fontLarger": return fontSize(prefsRef.current.fontSize + 1);
       case "fontSmaller": return fontSize(prefsRef.current.fontSize - 1);
       case "fontReset": return fontSize(13);
+      case "toggleFullscreen": {
+        if (!isTauri()) { setStatus("Full screen needs the desktop app"); return; }
+        const desktop = getCurrentWindow();
+        const next = !(await desktop.isFullscreen());
+        await desktop.setFullscreen(next);
+        setStatus(next ? "Full screen" : "Left full screen");
+        return;
+      }
+      case "focusTerminal": {
+        const focused = activePane();
+        if (!focused) { setStatus("No terminal is open"); return; }
+        focused.focus();
+        setStatus("Terminal focused");
+        return;
+      }
       case "interrupt": {
         const tab = activeTabNow();
         if (tab?.sessionId != null) await invoke(`${tab.transport ?? "pty"}_write`, { id: tab.sessionId, data: "\u0003" });
         return;
       }
       case "explain": return runExplain();
+      case "toggleBlocks": {
+        const next = !prefsRef.current.blocksEnabled;
+        persistPrefs({ ...prefsRef.current, blocksEnabled: next });
+        setStatus(next ? "Blocks on" : "Blocks off");
+        return;
+      }
+      case "openBlocks": return blocksOpen ? setBlocksOpen(false) : openPanel("blocks");
+      case "prevBlock": activePane()?.selectBlock(-1); return;
+      case "nextBlock": activePane()?.selectBlock(1); return;
+      case "copyBlock": return copyBlockPart("block");
+      case "explainBlock": return explainBlock();
+      case "openDrive": return driveOpen ? setDriveOpen(false) : openPanel("drive");
       case "saveTranscript": return saveText("transcript");
       case "saveSelection": return saveText("selection");
       case "exportHtml": return saveText("html");
@@ -549,6 +1033,7 @@ export default function App() {
       case "logSession": return toggleLog();
       case "sessionInfo": return openPanel("session");
       case "toggleReview": return toggleReview();
+      case "connectSsh": return openPanel("ssh-connect");
       case "connectSah": return openPanel("sah");
       case "connectConsole": return openPanel("console");
       case "sshCompat": return openPanel("ssh");
@@ -567,8 +1052,32 @@ export default function App() {
     if (action) { perform(action); return; }
     const signal = /^shell\.signal-([a-z]+)$/.exec(id)?.[1]?.toUpperCase();
     if (signal && SIGNALS.some(([name]) => name === signal)) { void sendSignal(signal as SignalName).catch((error) => setStatus(String(error))); return; }
-    if (id === "shell.stty-show") void sendCommand("stty -a", "Sent stty -a; the settings are in the terminal output").catch((error) => setStatus(String(error)));
-    if (id === "view.prefs") openPanel("prefs");
+    if (id === "shell.stty-show") { void sendCommand("stty -a", "Sent stty -a; the settings are in the terminal output").catch((error) => setStatus(String(error))); return; }
+    if (id === "view.prefs" || id === "ai.settings") { openPanel("prefs"); return; }
+    if (id === "view.copy-on-select") {
+      const next = !prefsRef.current.copyOnSelect;
+      persistPrefs({ ...prefsRef.current, copyOnSelect: next });
+      setStatus(next ? "Copy on select on" : "Copy on select off");
+      return;
+    }
+    if (id === "view.reduce-motion") {
+      const next = !prefsRef.current.reducedMotion;
+      persistPrefs({ ...prefsRef.current, reducedMotion: next });
+      setStatus(next ? "Reduce motion on" : "Reduce motion off");
+      return;
+    }
+    if (id === "ai.explain-block") { perform("explainBlock"); return; }
+    if (id === "blocks.copy-command") { void copyBlockPart("command").catch((error) => setStatus(String(error))); return; }
+    if (id === "blocks.copy-output") { void copyBlockPart("output").catch((error) => setStatus(String(error))); return; }
+    if (id === "blocks.snippet") {
+      void writeClipboard(INTEGRATION_SNIPPET).then(() => setStatus("Copied shell integration snippet")).catch((error) => setStatus(String(error)));
+      return;
+    }
+    if (id === "blocks.show-exit") { flipDisplay("blocksShowExit", "Exit codes shown", "Exit codes hidden"); return; }
+    if (id === "blocks.show-duration") { flipDisplay("blocksShowDuration", "Durations shown", "Durations hidden"); return; }
+    if (id === "blocks.show-timestamps") { flipDisplay("blocksShowTimestamps", "Timestamps shown", "Timestamps hidden"); return; }
+    if (id === "blocks.gutter") { flipDisplay("blocksGutter", "Block gutter on", "Block gutter off"); return; }
+    if (id === "blocks.shell-integration") { flipDisplay("blocksShellIntegration", "Shell integration on for new local tabs", "Shell integration off"); return; }
   };
   handleMenuRef.current = handleMenu;
 
@@ -576,7 +1085,7 @@ export default function App() {
     // Any new key press or click ends the window in which a duplicate menu event is ignored.
     const clearHandled = () => { keyHandled.current = null; };
     const onKey = (event: KeyboardEvent) => {
-      if (event.target instanceof HTMLElement && event.target.closest(".prefs, [role=dialog], .findbar, .console-panel, .ssh-panel")) return;
+      if (event.target instanceof HTMLElement && event.target.closest(".prefs, .blocks, .drive, [role=dialog], .findbar, .console-panel, .ssh-panel")) return;
       const action = matchAction(event);
       if (!action) return;
       event.preventDefault();
@@ -598,11 +1107,8 @@ export default function App() {
       <TabBar
         tabs={tabs}
         activeKey={activeKey}
-        onSelect={(key) => {
-          // Choosing the tab that is already open still moves focus to its terminal.
-          if (key === activeRef.current) panes.current.get(key)?.focus(); else setActiveKey(key);
-        }}
-        onClose={closeTab}
+        onSelect={selectTab}
+        onClose={requestClose}
         onNew={addTab}
       />
       {findOpen && (
@@ -614,7 +1120,7 @@ export default function App() {
           onClose={() => setFindOpen(false)}
         />
       )}
-      <main className="stage">
+      <main className={`stage${split ? ` is-split-${split.orientation}` : ""}`}>
         {!isTauri() && (
           <p className="browser-note">AfterTerm needs the desktop app. Run `npm run tauri dev`.</p>
         )}
@@ -632,24 +1138,54 @@ export default function App() {
               consoleConfig={tab.consoleConfig}
               onPaste={(text) => { if (tab.consoleConfig && tab.sessionId != null) setPaste({ id: tab.sessionId, text, config: tab.consoleConfig }); }}
               onChallenge={(id, next) => enqueueRef.current({ id, challenge: next, transport: tab.transport ?? "pty" })}
-              onAttached={(snapshot) => setTabs((current) => current.map((item) => item.key === tab.key && item.sessionId === tab.sessionId ? { ...item, reviewed: snapshot.reviewed, status: snapshot.exit != null ? "exited" : "running" } : item))}
+              onAttached={(snapshot) => {
+                const nextStatus = snapshot.exit != null ? "exited" : "running";
+                commitTabs((current) => {
+                  const item = current.find((entry) => entry.key === tab.key && entry.sessionId === tab.sessionId);
+                  if (!item || (item.reviewed === snapshot.reviewed && item.status === nextStatus)) return current;
+                  return current.map((entry) => entry.key === tab.key && entry.sessionId === tab.sessionId ? { ...entry, reviewed: snapshot.reviewed, status: nextStatus } : entry);
+                });
+              }}
               active={tab.key === activeKey}
+              shown={split ? split.keys.includes(tab.key) : tab.key === activeKey}
+              local={tab.origin?.kind === "local" || tab.origin == null}
+              hostnames={hostnames}
+              onAttention={() => noteAttention(tab.key, "bell")}
+              onCwd={(path) => {
+                commitTabs((current) => {
+                  const item = current.find((entry) => entry.key === tab.key);
+                  if (!item || item.reportedCwd === path) return current;
+                  return current.map((entry) => entry.key === tab.key ? { ...entry, reportedCwd: path } : entry);
+                });
+              }}
               prefs={prefs}
               onTitle={(title) => {
                 if (tab.transport === "serial") return;
-                setTabs((current) =>
-                  current.map((item) => (item.key === tab.key ? { ...item, title } : item)),
-                );
+                commitTabs((current) => {
+                  const item = current.find((entry) => entry.key === tab.key);
+                  if (!item || item.title === title) return current;
+                  return current.map((entry) => entry.key === tab.key ? { ...entry, title } : entry);
+                });
                 if (tab.sessionId != null) void invoke("pty_set_title", { id: tab.sessionId, title }).catch(() => undefined);
               }}
               onStatus={setStatus}
+              onBlocks={(sessionId, records, selectedId) => {
+                setBlocksBySession((current) => ({ ...current, [sessionId]: { blocks: records, selectedId } }));
+                const finished = records.filter((record) => record.status === "finished").length;
+                const previous = finishedCounts.current.has(sessionId) ? finishedCounts.current.get(sessionId) ?? null : null;
+                finishedCounts.current.set(sessionId, finished);
+                if (previous != null && finished > previous) noteAttention(tab.key, "finished");
+              }}
             />
           ),
         )}
       </main>
       <footer className="status">
         <button onClick={() => openPanel("console")}>Connect console</button>
+        <button onClick={() => (sshConnectOpen ? setSshConnectOpen(false) : openPanel("ssh-connect"))}>Connect SSH</button>
         <button onClick={() => (sahOpen ? setSahOpen(false) : openPanel("sah"))}>Connect SAH</button>
+        <button onClick={() => (blocksOpen ? setBlocksOpen(false) : openPanel("blocks"))}>Blocks</button>
+        <button onClick={() => (driveOpen ? setDriveOpen(false) : openPanel("drive"))}>Drive</button>
         <button onClick={() => openPanel("prefs")}>Preferences</button>
         <button onClick={() => openPanel("session")}>Session info</button>
         <button onClick={() => openPanel("ssh")}>SSH compatibility</button>
@@ -661,14 +1197,26 @@ export default function App() {
       </footer>
       {activeTab?.transport === "serial" && activeTab.sessionId != null && <ConsoleTools profileId={activeTab.consoleConfig?.profileId ?? "generic"} onHelper={(text) => { if (activeTab.consoleConfig && activeTab.sessionId != null) setPaste({ id: activeTab.sessionId, text, config: activeTab.consoleConfig }); }} key={activeTab.sessionId} onReconnect={() => void reconnectConsole(activeTab)} id={activeTab.sessionId} disabled={activeTab.status !== "running"} onStatus={setStatus} />}
       {sshOpen && <SshPanel onClose={() => setSshOpen(false)} />}
-      {sahOpen && <SahPanel host={sahHost} onHost={setSahHost} onClose={() => setSahOpen(false)} onLaunch={(title, args) => {
-        const tab = newTab(title); liveTabs.current.add(tab.key);
-        setTabs((current) => [...current, tab]); setActiveKey(tab.key);
-        void spawnFor(tab.key, undefined, args); setSahOpen(false);
-      }} />}
-      {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)} />}
+      {sshConnectOpen && <ConnectSshPanel user={sshUser} host={sshHost} port={sshPortText} onUser={setSshUser} onHost={setSshHost} onPort={setSshPortText} onClose={() => setSshConnectOpen(false)}
+        connections={prefs.connections.filter((item) => item.kind === "ssh")} connectionCount={prefs.connections.length} onSave={saveConnection}
+        onLaunch={(title, target) => { openSessionTab(title, { kind: "ssh", target, title }); setSshConnectOpen(false); }} />}
+      {sahOpen && <SahPanel host={sahHost} onHost={setSahHost} onClose={() => setSahOpen(false)} onLaunch={(title, args) => { openSessionTab(title, { kind: "sah", args }); setSahOpen(false); }} />}
+      {consoleOpen && <ConsolePanel onConnect={connectConsole} onClose={() => setConsoleOpen(false)}
+        connections={prefs.connections.filter((item) => item.kind === "serial")} connectionCount={prefs.connections.length} onSave={saveConnection} />}
       {prefsOpen && (
         <PrefsPanel prefs={prefs} onChange={persistPrefs} onClose={() => setPrefsOpen(false)} onStatus={setStatus} />
+      )}
+      {blocksOpen && (
+        <BlocksPanel
+          prefs={prefs}
+          blocks={activeTab?.sessionId != null ? blocksBySession[activeTab.sessionId]?.blocks ?? [] : []}
+          selectedId={activeTab?.sessionId != null ? blocksBySession[activeTab.sessionId]?.selectedId ?? null : null}
+          onSelect={(id) => activePane()?.selectBlockId(id)}
+          onClose={() => setBlocksOpen(false)}
+        />
+      )}
+      {driveOpen && (
+        <DrivePanel prefs={prefs} onCommit={persistPrefs} onClose={() => setDriveOpen(false)} onStatus={setStatus} />
       )}
       {sessionOpen && activeTab && (
         <SessionPanel key={activeTab.key} tab={activeTab} onClose={() => setSessionOpen(false)}
@@ -696,9 +1244,72 @@ export default function App() {
       }} typed={typed} onTyped={setTyped} busy={false} error=""
         onConfirm={() => { const request = commandRequest; setCommandRequest(null); void deliverCommand(request.key, request.sessionId, `${request.command}\n`, request.done, request.before).catch((error) => setStatus(String(error))); }}
         onCancel={() => { setCommandRequest(null); setStatus("Not sent"); }} />}
+      {closeAsk && (
+        <div className="confirm-scrim" role="dialog" aria-modal="true" aria-labelledby="close-tab-title">
+          <div className="confirm-card">
+            <h2 id="close-tab-title">Close this tab?</h2>
+            <p>A program is still running in this tab, or its state could not be read. Closing the tab stops it.</p>
+            <div className="confirm-actions">
+              <button type="button" autoFocus onClick={() => setCloseAsk(null)}>Cancel</button>
+              <button type="button" className="danger" onClick={() => {
+                const ask = closeAsk;
+                setCloseAsk(null);
+                const latest = tabsRef.current.find((tab) => tab.key === ask.key);
+                if (latest && latest.sessionId === ask.sessionId) closeTab(ask.key);
+              }}>Close tab</button>
+            </div>
+          </div>
+        </div>
+      )}
       <pre className="print-view" aria-hidden="true">{printText}</pre>
     </div>
   );
+}
+
+function ConnectSshPanel({ user, host, port, onUser, onHost, onPort, onClose, onLaunch, connections, connectionCount, onSave }: {
+  user: string; host: string; port: string;
+  onUser: (user: string) => void; onHost: (host: string) => void; onPort: (port: string) => void;
+  onClose: () => void; onLaunch: (title: string, target: SshTarget) => void;
+  connections: readonly Extract<SavedConnection, { kind: "ssh" }>[];
+  connectionCount: number;
+  onSave: (candidate: SavedConnection) => void;
+}) {
+  const panelRef = usePanel<HTMLElement>(onClose);
+  const [name, setName] = useState("");
+  const trimmedPort = port.trim();
+  const parsedPort = trimmedPort === "" ? null : sshPort(trimmedPort);
+  const destination = trimmedPort === "" || parsedPort != null ? sshDestination({ host, user, port: parsedPort }) : null;
+  const previewPort = trimmedPort === "" ? null : parsedPort ?? Number.NaN;
+  const preview = cleanConnection({ id: PREVIEW_CONNECTION_ID, name: name.trim(), kind: "ssh", host: host.trim(), user: user.trim(), port: previewPort });
+  const canSave = preview != null && connectionCount < 32;
+  const launch = () => {
+    if (!destination || (trimmedPort !== "" && parsedPort == null)) return;
+    onLaunch(`ssh ${destination}`, { host: host.trim(), user: user.trim() || null, port: parsedPort });
+  };
+  const save = () => {
+    if (!preview || preview.kind !== "ssh") return;
+    const clean = cleanConnection({ ...preview, id: crypto.randomUUID() });
+    if (clean) onSave(clean);
+  };
+  return <aside ref={panelRef} className="prefs" role="dialog" aria-labelledby="ssh-connect-title">
+    <header><h2 id="ssh-connect-title" tabIndex={-1}>Connect SSH</h2><button onClick={onClose}>Close</button></header>
+    <p className="prefs-note">Starts a new tab with the installed OpenSSH client. Host-key checking stays that client's default. AfterTerm does not store credentials and does not verify the remote target identity. Input starts in direct mode unless new tabs start reviewed in Preferences.</p>
+    <label>SSH user<input value={user} onChange={(event) => onUser(event.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false}
+      onKeyDown={(event) => { if (event.key === "Enter") launch(); }} /></label>
+    <label>SSH host<input data-autofocus value={host} onChange={(event) => onHost(event.target.value)} placeholder="web1 or [2001:db8::1]" autoCapitalize="off" autoCorrect="off" spellCheck={false}
+      onKeyDown={(event) => { if (event.key === "Enter") launch(); }} /></label>
+    <label>SSH port<input value={port} onChange={(event) => onPort(event.target.value)} inputMode="numeric" placeholder="22"
+      onKeyDown={(event) => { if (event.key === "Enter") launch(); }} /></label>
+    <button disabled={destination == null} onClick={launch}>Connect</button>
+    <label>Connection name<input value={name} onChange={(event) => setName(event.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false}
+      onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} /></label>
+    <button type="button" disabled={!canSave} onClick={save}>Save connection</button>
+    {connections.map((connection) => {
+      const label = sshDestination({ host: connection.host, user: connection.user, port: connection.port });
+      if (!label) return null;
+      return <button type="button" key={connection.id} onClick={() => onLaunch(`ssh ${label}`, { host: connection.host, user: connection.user, port: connection.port })}>Connect {connection.name}</button>;
+    })}
+  </aside>;
 }
 
 function SahPanel({ host, onHost, onClose, onLaunch }: {

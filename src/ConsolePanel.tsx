@@ -7,14 +7,59 @@ import { isTauri } from "./native.ts";
 import { usePanel } from "./usePanel.ts";
 
 import { DEFAULT_CONSOLE, type ConsoleConfig, type ConsolePort } from "./console.ts";
+import { cleanConnection, type SavedConnection } from "./sessions.ts";
 export type { ConsoleConfig } from "./console.ts";
-export function ConsolePanel({ onConnect, onClose }: {
-  onConnect: (config: ConsoleConfig) => Promise<void>; onClose: () => void;
+
+const PREVIEW_CONNECTION_ID = "00000000-0000-4000-8000-000000000000";
+
+function serialSaveConfig(config: ConsoleConfig, ports: readonly ConsolePort[]): ConsoleConfig {
+  const next: ConsoleConfig = {
+    path: config.path,
+    baud: config.baud,
+    data_bits: config.data_bits,
+    parity: config.parity,
+    stop_bits: config.stop_bits,
+    flow_control: config.flow_control,
+    production: config.production,
+    lineEnding: config.lineEnding,
+    backspace: config.backspace,
+    localEcho: config.localEcho,
+    profileId: config.profileId,
+  };
+  const identity = ports.find((port) => port.path === config.path)?.identity;
+  if (typeof identity === "string" && identity.length > 0) next.identity = identity;
+  if (typeof config.autoReconnect === "boolean") next.autoReconnect = config.autoReconnect;
+  return next;
+}
+
+export function ConsolePanel({ onConnect, onClose, connections, connectionCount, onSave }: {
+  onConnect: (config: ConsoleConfig) => Promise<void>;
+  onClose: () => void;
+  connections: readonly Extract<SavedConnection, { kind: "serial" }>[];
+  connectionCount: number;
+  onSave: (candidate: SavedConnection) => void;
 }) {
   const [config, setConfig] = useState<ConsoleConfig>(DEFAULT_CONSOLE);
   const [ports, setPorts] = useState<ConsolePort[]>([]);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+  const [name, setName] = useState("");
+  const preview = cleanConnection({ id: PREVIEW_CONNECTION_ID, name: name.trim(), kind: "serial", config: serialSaveConfig(config, ports) });
+  const canSave = preview != null && connectionCount < 32;
+  const save = () => {
+    if (!preview || preview.kind !== "serial") return;
+    const clean = cleanConnection({ ...preview, id: crypto.randomUUID() });
+    if (clean) onSave(clean);
+  };
+  const launchSaved = (next: ConsoleConfig) => {
+    void (async () => {
+      setBusy(true);
+      setError("");
+      try { await onConnect(next); onClose(); }
+      catch (e) { setError(String(e)); }
+      finally { setBusy(false); }
+    })();
+  };
   const refresh = async () => {
     if (!isTauri()) { setError("Open the desktop app to access serial devices."); return; }
     try { setPorts(await invoke("serial_ports")); setError(""); }
@@ -25,6 +70,12 @@ export function ConsolePanel({ onConnect, onClose }: {
   return <aside ref={panelRef} className="prefs" role="dialog" aria-labelledby="console-panel-title">
     <header><h2 id="console-panel-title" tabIndex={-1}>Connect a console</h2><button disabled={busy} onClick={onClose}>Close</button></header>
     <p className="prefs-note">Direct USB / serial access to switches, routers, servers, and appliances.</p>
+    {connections.map((connection) => (
+      <button type="button" key={connection.id} disabled={busy} onClick={() => launchSaved(connection.config)}>Connect {connection.name}</button>
+    ))}
+    <label>Connection name<input value={name} onChange={(event) => setName(event.target.value)} autoCapitalize="off" autoCorrect="off" spellCheck={false}
+      onKeyDown={(event) => { if (event.key === "Enter") event.preventDefault(); }} /></label>
+    <button type="button" disabled={!canSave || busy} onClick={save}>Save connection</button>
     <form className="console-form" onSubmit={async (event) => {
       event.preventDefault(); setBusy(true); setError("");
       try { await onConnect({ ...config, identity: ports.find((p) => p.path === config.path)?.identity ?? undefined }); onClose(); } catch (e) { setError(String(e)); } finally { setBusy(false); }

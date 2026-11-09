@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { sshSessionDestination } from "./ssh.ts";
 import { composeStty, EMPTY_STTY, STTY_CHARS, STTY_FLAGS, type SttyForm, type Tri } from "./stty.ts";
 import type { Tab } from "./TabBar.tsx";
 import { usePanel } from "./usePanel.ts";
@@ -76,12 +77,14 @@ export function SessionPanel({ tab, onClose, onStatus, onSignal, onReset, onStty
   const composed = composeStty(stty);
   const running = tab.status === "running";
   const sahHost = info && info.args[0] === "connect" ? info.args[1] : null;
+  const sshDest = info ? sshSessionDestination(info.program, info.args) : null;
   const facts: [string, string][] = info ? [
     ["Tab title", tab.title],
     ["Transport", "Local pseudo-terminal"],
     ["Program", info.program],
     ["Arguments", info.args.length ? info.args.join(" ") : "none"],
     ...(sahHost ? [["SAH host", `${sahHost} (not verified by AfterTerm)`] as [string, string]] : []),
+    ...(sshDest ? [["SSH destination", `${sshDest} (not verified by AfterTerm)`] as [string, string]] : []),
     ["Process ID", info.pid == null ? "unknown" : String(info.pid)],
     ["Foreground process group", info.foreground_pgid == null ? "unknown" : String(info.foreground_pgid)],
     ["Current directory", info.cwd ?? `unknown (started in ${info.start_cwd})`],

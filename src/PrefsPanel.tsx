@@ -4,6 +4,7 @@ import {
   parseColorInput, describeColor, colorLabel, type ThemeOverrides,
 } from "./themes.ts";
 import { DEFAULT_PREFS, LINE_HEIGHTS, type Prefs } from "./prefs.ts";
+import { DriveSettings } from "./DrivePanel.tsx";
 import { usePanel } from "./usePanel.ts";
 
 const FONTS = [
@@ -191,13 +192,93 @@ export function PrefsPanel({ prefs, onChange, onClose, onStatus }: Props) {
         <p className="prefs-note">Submission review holds every Enter for approval. It is off by default; existing tabs keep their current mode.</p>
       </section>
 
+      <section aria-labelledby="prefs-sessions">
+        <h3 id="prefs-sessions">Sessions</h3>
+        <label className="check">
+          <input type="checkbox" checked={prefs.newTabDirectory} onChange={(event) => set("newTabDirectory", event.target.checked)} />
+          New tab follows the current directory
+        </label>
+        <p className="prefs-note">A local shell uses that shell's directory. SSH is duplicated as host, user, and port. SAH and serial are not duplicated; the new tab is a local shell.</p>
+        <label className="check">
+          <input type="checkbox" checked={prefs.confirmCloseBusy} onChange={(event) => set("confirmCloseBusy", event.target.checked)} />
+          Ask before closing a tab with a program in the foreground
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.openLinks} onChange={(event) => set("openLinks", event.target.checked)} />
+          Open http and https links on Command-click or Control-click
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.markBackgroundTabs} onChange={(event) => set("markBackgroundTabs", event.target.checked)} />
+          Mark background tabs that bell or finish a command
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.notifySystem} onChange={(event) => {
+            const next = event.target.checked;
+            set("notifySystem", next);
+            if (!next) return;
+            if (typeof Notification === "undefined") { onStatus("System notifications are not available"); return; }
+            if (Notification.permission === "denied") { onStatus("System notifications are blocked"); return; }
+            if (Notification.permission === "default") void Notification.requestPermission();
+          }} />
+          Show a system notification when a background tab bells or a command finishes
+        </label>
+        <label>
+          When AfterTerm opens
+          <select id="prefs-restore" value={prefs.restoreSessions} onChange={(event) => set("restoreSessions", event.target.value as Prefs["restoreSessions"])}>
+            <option value="off">Off</option>
+            <option value="local">Local shells</option>
+            <option value="reconnect">Reconnect SSH and serial</option>
+          </select>
+        </label>
+        <p className="prefs-note">Restore is off until you turn it on. Saved connections store an SSH host, user, and port, or serial settings. Passwords and SAH tokens are not stored.</p>
+        {prefs.connections.length === 0
+          ? <p className="prefs-note">No saved connections. Save one from Connect SSH or Connect a console. Passwords and SAH tokens are not stored.</p>
+          : prefs.connections.map((connection) => (
+            <button type="button" key={connection.id} onClick={() => set("connections", prefs.connections.filter((item) => item.id !== connection.id))}>Remove {connection.name}</button>
+          ))}
+      </section>
+
       <section aria-labelledby="prefs-ai">
         <h3 id="prefs-ai">AI</h3>
         <label className="check">
           <input type="checkbox" checked={prefs.aiEnabled} onChange={(event) => set("aiEnabled", event.target.checked)} />
           Enable AI layer (optional)
         </label>
-        <p className="prefs-note">AI stays off the critical path. Shells, tabs, colors, and keybindings work with this unchecked.</p>
+        <p className="prefs-note">AI stays off the critical path. Shells, tabs, colors, and keybindings work with this unchecked. No AI provider is configured; the terminal does not depend on one.</p>
+      </section>
+
+      <section aria-labelledby="prefs-blocks">
+        <h3 id="prefs-blocks">Blocks</h3>
+        <label className="check">
+          <input type="checkbox" checked={prefs.blocksEnabled} onChange={(event) => set("blocksEnabled", event.target.checked, event.target.checked ? "Blocks on" : "Blocks off")} />
+          Enable Blocks
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.blocksGutter} onChange={(event) => set("blocksGutter", event.target.checked, event.target.checked ? "Block gutter on" : "Block gutter off")} />
+          Show the block gutter
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.blocksShowExit} onChange={(event) => set("blocksShowExit", event.target.checked, event.target.checked ? "Exit codes shown" : "Exit codes hidden")} />
+          Show exit codes
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.blocksShowDuration} onChange={(event) => set("blocksShowDuration", event.target.checked, event.target.checked ? "Durations shown" : "Durations hidden")} />
+          Show durations
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.blocksShowTimestamps} onChange={(event) => set("blocksShowTimestamps", event.target.checked, event.target.checked ? "Timestamps shown" : "Timestamps hidden")} />
+          Show timestamps
+        </label>
+        <label className="check">
+          <input type="checkbox" checked={prefs.blocksShellIntegration} onChange={(event) => set("blocksShellIntegration", event.target.checked, event.target.checked ? "Shell integration on for new local tabs" : "Shell integration off")} />
+          Shell integration for new local tabs
+        </label>
+        <p className="prefs-note">Shell integration applies only to new local zsh or bash tabs. SSH, SAH, and serial sessions are not injected. For fish and other shells, copy the shell integration snippet from the Blocks menu.</p>
+      </section>
+
+      <section aria-labelledby="prefs-drive">
+        <h3 id="prefs-drive">Drive</h3>
+        <DriveSettings prefs={prefs} onCommit={onChange} />
       </section>
 
       <section aria-labelledby="prefs-reset">
@@ -205,7 +286,7 @@ export function PrefsPanel({ prefs, onChange, onClose, onStatus }: Props) {
         {!confirmReset
           ? <button type="button" onClick={() => setConfirmReset(true)}>Reset all preferences to defaults…</button>
           : <div role="group" aria-labelledby="prefs-reset-question">
-            <p id="prefs-reset-question">Reset every preference, including custom colors, to the defaults? This cannot be undone.</p>
+            <p id="prefs-reset-question">Reset every preference, including custom colors and saved connections, to the defaults? This cannot be undone.</p>
             <div className="palette-actions">
               <button type="button" autoFocus onClick={() => setConfirmReset(false)}>Cancel</button>
               <button type="button" className="danger" onClick={() => {

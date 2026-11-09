@@ -9,12 +9,17 @@ import { SearchAddon } from "@xterm/addon-search";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { WebglAddon } from "@xterm/addon-webgl";
 import "@xterm/xterm/css/xterm.css";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import type { Challenge } from "./ConfirmDialog.tsx";
+import { isTauri } from "./native.ts";
 import type { Prefs } from "./prefs.ts";
+import { linkToOpen, localOsc7Path } from "./sessions.ts";
 import { resolveTheme, withAlpha } from "./themes.ts";
 import { writeClipboard } from "./clipboard.ts";
 import { linesToText } from "./transcript.ts";
 import { terminalHandlesKey } from "./keybindings.ts";
+import { BlockStore, type TermLike } from "./blockMarkers.ts";
+import type { BlockRecord } from "./blocks.ts";
 
 const MAX_LAYOUT_FRAMES = 60;
 
@@ -44,6 +49,7 @@ function terminalOptions(prefs: Prefs) {
     scrollback: prefs.scrollback,
     macOptionIsMeta: prefs.optionAsMeta,
     screenReaderMode: prefs.screenReaderMode,
+    overviewRulerWidth: prefs.blocksEnabled && prefs.blocksGutter ? 14 : 0,
   };
 }
 
@@ -78,6 +84,9 @@ export type TerminalPaneHandle = {
   /** Full xterm reset of the local renderer (does not write to the session). */
   reset: () => void;
   size: () => { rows: number; cols: number } | null;
+  selectBlock: (delta: number) => void;
+  selectBlockId: (id: string) => void;
+  blockText: (part: "command" | "output" | "block") => string;
 };
 
 type Props = {
@@ -91,13 +100,19 @@ type Props = {
   prefs: Prefs;
   onTitle: (title: string) => void;
   onStatus: (message: string) => void;
+  onBlocks?: (sessionId: number, blocks: BlockRecord[], selectedId: string | null) => void;
   /** Tab panel id and the id of the tab that labels it. */
   panelId?: string;
   tabId?: string;
+  shown?: boolean;
+  onAttention?: () => void;
+  onCwd?: (path: string) => void;
+  local?: boolean;
+  hostnames?: readonly string[];
 };
 
 export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function TerminalPane(
-  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, onAttached, active, prefs, onTitle, onStatus, panelId, tabId },
+  { sessionId, consoleConfig, transport = "pty", onPaste, onChallenge, onAttached, active, shown = active, prefs, onTitle, onStatus, onBlocks, panelId, tabId, onAttention, onCwd, local = false, hostnames = [] },
   ref,
 ) {
   const hostRef = useRef<HTMLDivElement>(null);
@@ -112,9 +127,20 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   onTitleRef.current = onTitle;
   const onStatusRef = useRef(onStatus);
   onStatusRef.current = onStatus;
+  const onBlocksRef = useRef(onBlocks);
+  onBlocksRef.current = onBlocks;
+  const blocksApi = useRef<BlockStore | null>(null);
 
   const pasteRef = useRef(onPaste);
   pasteRef.current = onPaste;
+  const localRef = useRef(local);
+  localRef.current = local;
+  const hostnamesRef = useRef(hostnames);
+  hostnamesRef.current = hostnames;
+  const onAttentionRef = useRef(onAttention);
+  onAttentionRef.current = onAttention;
+  const onCwdRef = useRef(onCwd);
+  onCwdRef.current = onCwd;
   const challengeRef = useRef(onChallenge);
   challengeRef.current = onChallenge;
   const resize = (rows: number, cols: number) => transport === "serial" ? Promise.resolve() : invoke("pty_resize", { id: sessionRef.current, rows, cols });
@@ -178,6 +204,9 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     send: (text: string) => write(text),
     reset: () => termRef.current?.reset(),
     size: () => (termRef.current ? { rows: termRef.current.rows, cols: termRef.current.cols } : null),
+    selectBlock: (delta: number) => blocksApi.current?.selectBlock(delta),
+    selectBlockId: (id: string) => blocksApi.current?.selectBlockId(id),
+    blockText: (part) => blocksApi.current?.blockText(part) ?? "",
   }));
 
   useEffect(() => {
@@ -194,10 +223,34 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const search = new SearchAddon();
     term.loadAddon(fit);
     term.loadAddon(search);
-    term.loadAddon(new WebLinksAddon());
+    term.loadAddon(new WebLinksAddon((event, uri) => {
+      const href = linkToOpen(uri, Boolean(event.metaKey || event.ctrlKey), prefsRef.current.openLinks);
+      if (!href || !isTauri()) return;
+      event.preventDefault();
+      void openUrl(href);
+    }));
     termRef.current = term;
     fitRef.current = fit;
     searchRef.current = search;
+    const blocks = new BlockStore(term as unknown as TermLike, (records, selectedId) => {
+      onBlocksRef.current?.(sessionRef.current, records, selectedId);
+    });
+    blocksApi.current = blocks;
+    const osc133 = term.parser.registerOscHandler(133, (data) => {
+      const current = prefsRef.current;
+      return blocks.handle(current.blocksEnabled, current.blocksGutter, 133, data);
+    });
+    const osc633 = term.parser.registerOscHandler(633, (data) => {
+      const current = prefsRef.current;
+      return blocks.handle(current.blocksEnabled, current.blocksGutter, 633, data);
+    });
+    const osc7 = term.parser.registerOscHandler(7, (data) => {
+      if (localRef.current) {
+        const path = localOsc7Path(data, hostnamesRef.current);
+        onCwdRef.current?.(path ?? "");
+      }
+      return true;
+    });
 
     let disposed = false;
     let listeners: UnlistenFn[] = [];
@@ -307,6 +360,7 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
     const title = term.onTitleChange((value) => onTitleRef.current(value || "shell"));
     let flash = 0;
     const bell = term.onBell(() => {
+      onAttentionRef.current?.();
       const style = prefsRef.current.bellStyle;
       if (style === "sound") beep();
       if (style === "visual") {
@@ -338,6 +392,11 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
       window.clearTimeout(flash);
       window.clearTimeout(copyTimer);
       listeners.forEach((unlisten) => unlisten());
+      blocks.clearBlocks();
+      blocksApi.current = null;
+      osc133.dispose();
+      osc633.dispose();
+      osc7.dispose();
       webgl?.dispose();
       term.dispose();
       termRef.current = null;
@@ -355,8 +414,15 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
   }, [prefs]);
 
   useEffect(() => {
-    if (!active) return;
-    termRef.current?.focus();
+    const blocks = blocksApi.current;
+    if (!blocks) return;
+    if (!prefs.blocksEnabled) blocks.clearBlocks();
+    else blocks.refreshGutter(prefs.blocksEnabled, prefs.blocksGutter);
+  }, [prefs.blocksEnabled, prefs.blocksGutter]);
+
+  useEffect(() => {
+    if (!shown) return;
+    if (active) termRef.current?.focus();
     const term = termRef.current;
     const fit = fitRef.current;
     if (!term || !fit) return;
@@ -368,9 +434,10 @@ export const TerminalPane = forwardRef<TerminalPaneHandle, Props>(function Termi
         /* layout */
       }
     });
-  }, [active]);
+  }, [shown, active]);
 
-  return <div className={`term-host ${active ? "is-active" : "is-inactive"}`} ref={hostRef}
+  const visibility = shown && active ? "is-active" : shown ? "is-shown" : "is-inactive";
+  return <div className={`term-host ${visibility}`} ref={hostRef}
     id={panelId} role={panelId ? "tabpanel" : undefined} aria-labelledby={tabId} onPasteCapture={(event) => {
     if (transport !== "serial") return;
     event.preventDefault(); event.stopPropagation(); pasteRef.current(event.clipboardData.getData("text/plain"));

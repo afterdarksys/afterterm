@@ -1,6 +1,8 @@
 export type Action =
   | "newTab"
+  | "newWindow"
   | "closeTab"
+  | "closeWindow"
   | "nextTab"
   | "prevTab"
   | "copy"
@@ -9,12 +11,16 @@ export type Action =
   | "selectAll"
   | "clearSelection"
   | "find"
+  | "findNext"
+  | "findPrev"
   | "prefs"
   | "clear"
   | "resetTerminal"
   | "fontLarger"
   | "fontSmaller"
   | "fontReset"
+  | "toggleFullscreen"
+  | "focusTerminal"
   | "interrupt"
   | "explain"
   | "saveTranscript"
@@ -24,16 +30,29 @@ export type Action =
   | "logSession"
   | "sessionInfo"
   | "toggleReview"
+  | "connectSsh"
   | "connectSah"
   | "connectConsole"
-  | "sshCompat";
+  | "sshCompat"
+  | "toggleBlocks"
+  | "openBlocks"
+  | "prevBlock"
+  | "nextBlock"
+  | "copyBlock"
+  | "explainBlock"
+  | "openDrive"
+  | "splitRight"
+  | "splitDown"
+  | "focusOtherPane";
 
 export type Bindings = Record<Action, string>;
 
 /** macOS bindings. Mod is Command there, so Control+letter stays with the shell. */
 export const DEFAULT_BINDINGS: Bindings = {
   newTab: "Mod+T",
+  newWindow: "Mod+N",
   closeTab: "Mod+W",
+  closeWindow: "Mod+Shift+W",
   nextTab: "Mod+Shift+]",
   prevTab: "Mod+Shift+[",
   copy: "Mod+C",
@@ -42,12 +61,16 @@ export const DEFAULT_BINDINGS: Bindings = {
   selectAll: "Mod+A",
   clearSelection: "Mod+Shift+A",
   find: "Mod+F",
+  findNext: "Mod+G",
+  findPrev: "Mod+Alt+G",
   prefs: "Mod+,",
   clear: "Mod+K",
   resetTerminal: "Mod+Alt+R",
   fontLarger: "Mod+=",
   fontSmaller: "Mod+-",
   fontReset: "Mod+0",
+  toggleFullscreen: "Ctrl+Mod+F",
+  focusTerminal: "Mod+L",
   interrupt: "Ctrl+Shift+C",
   explain: "Mod+Shift+E",
   saveTranscript: "Mod+S",
@@ -57,9 +80,20 @@ export const DEFAULT_BINDINGS: Bindings = {
   logSession: "Mod+Shift+L",
   sessionInfo: "Mod+I",
   toggleReview: "Mod+Shift+R",
+  connectSsh: "Mod+Shift+Y",
   connectSah: "Mod+Shift+H",
   connectConsole: "Mod+Shift+O",
   sshCompat: "Mod+Shift+K",
+  toggleBlocks: "Mod+Shift+B",
+  openBlocks: "Mod+Shift+J",
+  prevBlock: "Mod+Shift+Up",
+  nextBlock: "Mod+Shift+Down",
+  copyBlock: "Mod+Shift+Alt+B",
+  explainBlock: "Mod+Shift+G",
+  openDrive: "Mod+Shift+D",
+  splitRight: "Mod+Alt+Right",
+  splitDown: "Mod+Alt+Down",
+  focusOtherPane: "Mod+Alt+Left",
 };
 
 /**
@@ -71,7 +105,9 @@ export const DEFAULT_BINDINGS: Bindings = {
  */
 export const OTHER_BINDINGS: Bindings = {
   newTab: "Ctrl+Shift+T",
+  newWindow: "Ctrl+Shift+N",
   closeTab: "Ctrl+Shift+W",
+  closeWindow: "Ctrl+Shift+Alt+W",
   nextTab: "Ctrl+Shift+]",
   prevTab: "Ctrl+Shift+[",
   copy: "Ctrl+Shift+C",
@@ -80,12 +116,16 @@ export const OTHER_BINDINGS: Bindings = {
   selectAll: "Ctrl+Shift+A",
   clearSelection: "Ctrl+Shift+Alt+A",
   find: "Ctrl+Shift+F",
+  findNext: "Ctrl+Shift+Alt+G",
+  findPrev: "Shift+F3",
   prefs: "Ctrl+,",
   clear: "Ctrl+Shift+K",
   resetTerminal: "Ctrl+Shift+Alt+R",
   fontLarger: "Ctrl+=",
   fontSmaller: "Ctrl+-",
   fontReset: "Ctrl+0",
+  toggleFullscreen: "F11",
+  focusTerminal: "Ctrl+Shift+Alt+L",
   interrupt: "Ctrl+Shift+Alt+C",
   explain: "Ctrl+Shift+E",
   saveTranscript: "Ctrl+Shift+S",
@@ -95,15 +135,28 @@ export const OTHER_BINDINGS: Bindings = {
   logSession: "Ctrl+Shift+L",
   sessionInfo: "Ctrl+Shift+I",
   toggleReview: "Ctrl+Shift+R",
+  connectSsh: "Ctrl+Shift+Y",
   connectSah: "Ctrl+Shift+H",
   connectConsole: "Ctrl+Shift+O",
   sshCompat: "Ctrl+Shift+Alt+K",
+  toggleBlocks: "Ctrl+Shift+B",
+  openBlocks: "Ctrl+Shift+J",
+  prevBlock: "Ctrl+Shift+Up",
+  nextBlock: "Ctrl+Shift+Down",
+  copyBlock: "Ctrl+Shift+Alt+B",
+  explainBlock: "Ctrl+Shift+G",
+  openDrive: "Ctrl+Shift+D",
+  splitRight: "Ctrl+Shift+Alt+Right",
+  splitDown: "Ctrl+Shift+Alt+Down",
+  focusOtherPane: "Ctrl+Shift+Alt+Left",
 };
 
 /** Menu item ids (src-tauri/src/lib.rs install_menu) that run the same action as a keybinding. */
 export const MENU_ACTIONS: Record<string, Action> = {
   "file.new-tab": "newTab",
+  "file.new-window": "newWindow",
   "file.close-tab": "closeTab",
+  "file.close-window": "closeWindow",
   "file.save-transcript": "saveTranscript",
   "file.save-selection": "saveSelection",
   "file.export-html": "exportHtml",
@@ -116,11 +169,21 @@ export const MENU_ACTIONS: Record<string, Action> = {
   "edit.select-all": "selectAll",
   "edit.clear-selection": "clearSelection",
   "edit.find": "find",
-  "edit.explain": "explain",
+  "edit.find-next": "findNext",
+  "edit.find-prev": "findPrev",
+  "ai.explain": "explain",
+  "blocks.toggle": "toggleBlocks",
+  "blocks.open": "openBlocks",
+  "blocks.prev": "prevBlock",
+  "blocks.next": "nextBlock",
+  "blocks.copy": "copyBlock",
+  "blocks.explain": "explainBlock",
+  "drive.open": "openDrive",
   "shell.clear": "clear",
   "shell.reset": "resetTerminal",
   "shell.interrupt": "interrupt",
   "shell.toggle-review": "toggleReview",
+  "shell.connect-ssh": "connectSsh",
   "shell.connect-sah": "connectSah",
   "shell.connect-console": "connectConsole",
   "shell.ssh-compat": "sshCompat",
@@ -128,8 +191,13 @@ export const MENU_ACTIONS: Record<string, Action> = {
   "view.font-larger": "fontLarger",
   "view.font-smaller": "fontSmaller",
   "view.font-reset": "fontReset",
+  "view.fullscreen": "toggleFullscreen",
+  "view.focus-terminal": "focusTerminal",
   "window.next-tab": "nextTab",
   "window.prev-tab": "prevTab",
+  "window.split-right": "splitRight",
+  "window.split-down": "splitDown",
+  "window.focus-other": "focusOtherPane",
 };
 
 type KeyEventLike = Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "altKey" | "shiftKey"> & { code?: string };
@@ -166,7 +234,9 @@ export function chordMatches(chord: string, event: KeyEventLike): boolean {
   if (Boolean(event.altKey) !== needAlt) return false;
   if (Boolean(event.shiftKey) !== needShift) return false;
 
-  const pressed = event.key.length === 1 ? event.key.toUpperCase() : event.key;
+  const arrowKeys: Record<string, string> = { ArrowUp: "Up", ArrowDown: "Down", ArrowLeft: "Left", ArrowRight: "Right" };
+  const pressedRaw = arrowKeys[event.key] ?? event.key;
+  const pressed = pressedRaw.length === 1 ? pressedRaw.toUpperCase() : pressedRaw;
   const expected = key.length === 1 ? key.toUpperCase() : key;
   if (expected === "=" && (pressed === "=" || pressed === "+")) return true;
   if (pressed === expected) return true;

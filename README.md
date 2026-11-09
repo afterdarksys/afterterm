@@ -69,7 +69,9 @@ AfterTerm menu: About AfterTerm; Preferences (Mod+Comma); Services; Hide;
 Quit AfterTerm (Mod+Q).
 
 File menu:
-- New Tab (Mod+T) and Close Tab (Mod+W).
+- New Tab (Mod+T) opens another tab in this window. New Window (Mod+N) opens
+  another AfterTerm window. Close Tab (Mod+W) closes the selected tab. Close
+  Window (Mod+Shift+W) closes this window.
 - Save Transcript (Mod+S) saves the whole scrollback of the active tab as plain
   text. Save Selection (Mod+Shift+S) saves only the selected text. Export
   Transcript as HTML (Mod+Option+S) writes a script-free HTML page with the
@@ -88,7 +90,10 @@ configuration or data folders, and leaves saved files readable only by you
 (mode 0600).
 
 Edit menu: Cut (Mod+X), Copy (Mod+C), Paste (Mod+V), Select All (Mod+A),
-Clear Selection (Mod+Shift+A), Find (Mod+F), Explain Selection (Mod+Shift+E).
+Clear Selection (Mod+Shift+A), Find (Mod+F), Find Next (Mod+G), Find Previous
+(Mod+Option+G). Find Next and Find Previous repeat the text already in the
+find bar, and an empty find opens the bar. The terminal does not undo
+keystrokes, so Edit has no Undo or Redo, and Control-Z stays with the shell.
 Copy uses the system clipboard directly. Terminal output cannot be deleted, so
 Cut copies the selection and then clears it, and says so. Paste goes through the
 same path as typing: bracketed paste is honored and, when submission review is on
@@ -96,6 +101,29 @@ for the tab, the Enter is held for approval. In a text field inside a panel thes
 commands act on that field instead of the terminal; paste there respects the
 field's length limit (and says how much was cut off) and can be undone. Copy on
 select is an option in Preferences and is off by default.
+
+AI menu: Explain Selection (Mod+Shift+E), Explain Block, and AI Settings.
+Explain Selection reads the current terminal selection. Explain Block reads the
+selected command block. No AI provider is configured. Shells, copy, and search
+keep working when AI is off or every AI call fails. AI Settings opens
+Preferences.
+
+Blocks menu: Enable Blocks (Mod+Shift+B), Blocks Panel (Mod+Shift+J), Previous
+Block (Mod+Shift+Up), Next Block (Mod+Shift+Down), Copy Block
+(Mod+Shift+Option+B), Copy Command, Copy Output, Explain Block (Mod+Shift+G),
+Copy Shell Integration Snippet, and display choices for exit codes, durations,
+timestamps, the block gutter, and shell integration for new local tabs. Blocks
+stay off until you enable them. They group commands from OSC 133 and OSC 633
+markers on the existing terminal. Shell integration is injected only for new
+local zsh or bash tabs, and only when both Blocks and shell integration are on.
+SSH, SAH, and serial sessions are not injected. Other shells can use the copied
+snippet.
+
+Drive menu: Drive Panel (Mod+Shift+D). darkstorage.io is a fully S3-compatible
+storage system. Drive speaks its S3 API with path-style SigV4 at the endpoint
+you configure, https://api.darkstorage.io/s3. The secret access key stays in
+the environment or in a file you name. It is not stored in preferences. This
+client holds each object in memory and refuses anything over 8 MiB.
 
 Shell menu:
 - Clear Scrollback (Mod+K).
@@ -108,8 +136,8 @@ Shell menu:
   otherwise to the tab's own program.
 - Toggle Submission Review (Mod+Shift+R). Turning review off still asks you to
   type DIRECT.
-- Connect SAH (Mod+Shift+H), Connect Serial Console (Mod+Shift+O) and SSH
-  Compatibility (Mod+Shift+K).
+- Connect SSH (Mod+Shift+Y), Connect SAH (Mod+Shift+H), Connect Serial Console
+  (Mod+Shift+O) and SSH Compatibility (Mod+Shift+K).
 
 Commands that type into the session never run on their own: each one needs you to
 choose it, and each goes through the normal input path, so review applies. When
@@ -118,8 +146,11 @@ already typed on the command line; this assumes a readline-style line editor suc
 as bash, zsh or fish. When another program is in the foreground (vim, ssh, a router
 CLI), the text would go to that program instead, so you must type SEND to confirm.
 
-View menu: Session Info (Mod+I); Bigger Text (Mod+Equals), Smaller Text
-(Mod+Minus), Default Text Size (Mod+0); Preferences and Themes.
+View menu: Session Info (Mod+I); Zoom In (Mod+Equals), Zoom Out (Mod+Minus),
+Actual Size (Mod+0); Full Screen (Control+Mod+F); Focus Terminal (Mod+L);
+Copy on Select; Reduce Motion; Themes. Themes opens Preferences on the theme
+list. Copy on Select and Reduce Motion are the same switches as in Preferences.
+Block display choices stay on the Blocks menu.
 
 Window menu: Minimize, Zoom, Next Tab (Mod+Shift+Right Bracket), Previous Tab
 (Mod+Shift+Left Bracket).
@@ -149,20 +180,27 @@ it. So AfterTerm uses Control+Shift for letter shortcuts, as other Linux
 terminals do, and adds Alt where that would collide. Control-C always goes to
 the shell.
 
-- New Tab Control+Shift+T, Close Tab Control+Shift+W.
+- New Tab Control+Shift+T, New Window Control+Shift+N, Close Tab
+  Control+Shift+W, Close Window Control+Shift+Alt+W.
 - Save Transcript Control+Shift+S, Save Selection Control+Shift+Alt+S, Export
   Transcript as HTML Control+Shift+Alt+H, Log Session Control+Shift+L, Print
   Control+Shift+P.
 - Cut Control+Shift+X, Copy Control+Shift+C, Paste Control+Shift+V, Select All
   Control+Shift+A, Clear Selection Control+Shift+Alt+A, Find Control+Shift+F,
-  Explain Selection Control+Shift+E.
+  Find Next Control+Shift+Alt+G, Find Previous Shift+F3.
+- Explain Selection Control+Shift+E (AI menu), Explain Block Control+Shift+G.
+- Enable Blocks Control+Shift+B, Blocks Panel Control+Shift+J, Previous Block
+  Control+Shift+Up, Next Block Control+Shift+Down, Copy Block
+  Control+Shift+Alt+B, Drive Panel Control+Shift+D.
 - Clear Scrollback Control+Shift+K, Reset Terminal Control+Shift+Alt+R, Send
   Control-C Control+Shift+Alt+C (plain Control-C does the same in the terminal),
-  Toggle Submission Review Control+Shift+R, Connect SAH Control+Shift+H, Connect
-  Serial Console Control+Shift+O, SSH Compatibility Control+Shift+Alt+K.
-- Session Info Control+Shift+I, Preferences Control+Comma, Bigger Text
-  Control+Equals, Smaller Text Control+Minus, Default Text Size Control+0, Next
-  Tab Control+Shift+Right Bracket, Previous Tab Control+Shift+Left Bracket.
+  Toggle Submission Review Control+Shift+R, Connect SSH Control+Shift+Y, Connect
+  SAH Control+Shift+H, Connect Serial Console Control+Shift+O, SSH Compatibility
+  Control+Shift+Alt+K.
+- Session Info Control+Shift+I, Preferences Control+Comma, Zoom In
+  Control+Equals, Zoom Out Control+Minus, Actual Size Control+0, Full Screen
+  F11, Focus Terminal Control+Shift+Alt+L, Next Tab Control+Shift+Right Bracket,
+  Previous Tab Control+Shift+Left Bracket.
 
 When the terminal has focus, a key that is an AfterTerm shortcut goes only to
 AfterTerm and never also to the session, so Send Control-C sends exactly one
@@ -171,8 +209,9 @@ Control-C.
 ### Session Info panel
 
 For the active tab it lists: tab title, transport, program and arguments (the
-SAH host for a SAH tab), process ID, foreground process group, current
-directory, rows and columns, start time, bytes received and sent, exit code,
+SAH host for a SAH tab, or the SSH destination for an SSH tab), process ID,
+foreground process group, current directory, rows and columns, start time,
+bytes received and sent, exit code,
 submission review state, and session log state. It refreshes every second.
 
 Below the facts are labeled controls: one button per signal; Reset terminal;
@@ -192,8 +231,14 @@ reads back the current value and its nearest color name; palette export and
 import as JSON; window transparency), Text (font, size, line height), Cursor and
 bell (shape, blink, reduce motion, bell none, sound or visual flash), Terminal
 behavior (screen reader mode, Option as Meta, copy on select, scrollback lines,
-start new tabs with submission review on, which is off by default), AI, and
-Reset all preferences to defaults, which asks for confirmation first.
+start new tabs with submission review on, which is off by default), AI (optional,
+and off until you enable it; no provider is configured), Blocks (enable, gutter,
+exit codes, durations, timestamps, and shell integration for new local zsh or
+bash tabs), Drive (endpoint, signing region, bucket, access key id, and where
+the secret access key is read from), and Reset all preferences to defaults,
+which asks for confirmation first. Drive fields are saved when you leave a
+valid field. An invalid endpoint, region, bucket, access key id, or secret path
+stays in the form and is not written, so it cannot block saving a theme.
 
 ## Reliability and product direction
 
@@ -333,13 +378,29 @@ Under **Console controls**, vendor helpers display their exact command and scope
 then open paste review. Ensure the current device prompt is in the specified mode.
 AfterTerm does not infer vendor or CLI mode from a USB adapter or prompt.
 
+## Connect SSH
+
+**Connect SSH** opens a new terminal tab already running the installed OpenSSH
+client. AfterTerm resolves `ssh` on the developer PATH and starts
+`ssh -t`, an optional `-p PORT`, then `--` and the destination. The destination
+is `host` or `user@host`. Enter an IPv6 address in brackets, for example
+`[2001:db8::1]`. Leave the port empty to use the client's default.
+
+Host-key checking stays the OpenSSH client's own default. AfterTerm does not
+pass options, identity files, or proxy commands, does not store credentials,
+and does not verify the remote target identity. A new ordinary tab is still a
+local shell. Direct mode does not review input. If Preferences start new tabs
+with submission review, the SSH tab starts reviewed; if that setting cannot be
+applied, the session is closed.
+
 ## SSH compatibility
 
 **SSH compatibility** queries the installed OpenSSH client's supported algorithms
 with `ssh -Q`, using the desktop developer PATH. It generates a reviewable config
 stanza for one exact hostname/IP and appends chosen algorithms to defaults.
-It neither connects to a host nor edits `~/.ssh/config`. Host-key checking is not
-weakened, and algorithms removed from the installed client are not offered.
+It does not connect to a host and it does not edit `~/.ssh/config`. Use Connect
+SSH to open a session. Host-key checking is not weakened, and algorithms removed
+from the installed client are not offered.
 See [OpenSSH's compatibility guidance](https://www.openssh.org/legacy.html).
 
 ## Qualification

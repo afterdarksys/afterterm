@@ -99,6 +99,20 @@ body {
   white-space: nowrap;
 }
 
+.tab.has-attention .tab-title { position: relative; padding-left: 12px; }
+
+.tab.has-attention .tab-title::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  width: 7px;
+  height: 7px;
+  margin-top: -3.5px;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
 .tab-close {
   padding: 4px 6px;
   border-radius: 5px;
@@ -167,6 +181,17 @@ body {
   padding: 8px 10px 4px;
 }
 
+.stage.is-split-right, .stage.is-split-down {
+  display: grid;
+  height: 100%;
+  min-height: 0;
+  gap: 8px;
+}
+
+.stage.is-split-right { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+
+.stage.is-split-down { grid-template-rows: minmax(0, 1fr) minmax(0, 1fr); }
+
 .term-host {
   height: 100%;
   min-height: 0;
@@ -177,6 +202,20 @@ body {
   inset: 8px 10px 4px;
   visibility: hidden;
   pointer-events: none;
+}
+
+.stage.is-split-right .term-host.is-active,
+.stage.is-split-right .term-host.is-shown,
+.stage.is-split-down .term-host.is-active,
+.stage.is-split-down .term-host.is-shown {
+  position: relative;
+  inset: auto;
+  visibility: visible;
+  pointer-events: auto;
+  min-width: 0;
+  min-height: 0;
+  height: 100%;
+  outline: 1px solid var(--line);
 }
 
 .term-host .xterm, .term-host .xterm-viewport, .term-host .xterm-screen {
@@ -195,6 +234,8 @@ body {
   top: 52px;
   right: 12px;
   width: 280px;
+  max-height: calc(100% - 64px);
+  overflow: auto;
   padding: 14px;
   display: grid;
   gap: 12px;
@@ -277,6 +318,15 @@ body {
 .crash pre { white-space: pre-wrap; color: var(--danger); }
 
 .prefs { width: min(380px, calc(100vw - 24px)); max-height: calc(100dvh - 72px); overflow-y: auto; z-index: 10; }
+.prefs.blocks, .prefs.drive { width: min(460px, calc(100vw - 24px)); }
+.prefs h3 { margin: 0; font-size: 13px; font-weight: 600; }
+.prefs textarea { width: 100%; resize: vertical; background: color-mix(in srgb, var(--ink) 70%, transparent); color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 6px 8px; font: 13px var(--mono); }
+.block-list, .drive-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+.block-list button, .drive-list button { text-align: left; display: grid; gap: 2px; width: 100%; font: 12px var(--mono); }
+.block-list button[aria-current="true"] { border-color: var(--accent); }
+.block-list small, .drive-list small { color: var(--muted); }
+.drive-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.drive-preview { white-space: pre-wrap; max-height: 180px; overflow: auto; margin: 0; font: 12px var(--mono); background: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 8px; }
 .palette-editor { border-block: 1px solid var(--line); padding-block: 12px; }
 .palette-editor summary { cursor: pointer; color: var(--accent); font-size: 13px; }
 .palette-editor > * + * { margin-top: 12px; }

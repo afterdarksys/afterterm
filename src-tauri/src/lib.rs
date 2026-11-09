@@ -1,15 +1,24 @@
+mod drive;
 mod files;
 mod launch;
 mod prefs;
 mod serial;
+mod shell_integration;
 mod ssh;
+mod workspace;
+use drive::{
+    drive_delete, drive_download, drive_list_buckets, drive_list_objects, drive_preview,
+    drive_put_file, drive_put_text,
+};
 use serial::{
     serial_attach, serial_cancel_paste, serial_close, serial_confirm, serial_control, serial_open,
     serial_paste, serial_ports, serial_review, serial_write,
 };
 use ssh::ssh_algorithms;
+use workspace::{local_hostnames, workspace_load, workspace_save};
 
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use afterterm_pty::session::{
@@ -87,27 +96,60 @@ fn session_id(id: u64) -> SessionId {
 
 #[tauri::command]
 fn pty_spawn(
+    app: AppHandle,
     state: State<PtyHandle>,
     rows: u16,
     cols: u16,
     cwd: Option<String>,
     sah_args: Option<Vec<String>>,
+    ssh: Option<ssh::SshTarget>,
 ) -> Result<u64, String> {
     let cwd = cwd.map(PathBuf::from);
-    let args = sah_args.unwrap_or_default();
-    let program = if args.is_empty() {
-        None
+    let sah_args = sah_args.unwrap_or_default();
+    if ssh.is_some() && !sah_args.is_empty() {
+        return Err("choose one connection: SSH or SAH".into());
+    }
+    let (mut program, mut args) = if let Some(target) = ssh {
+        (Some(ssh::ssh_program()?), ssh::ssh_argv(&target)?)
+    } else if sah_args.is_empty() {
+        (None, Vec::new())
     } else {
-        Some(
-            launch::sah_binary()?
-                .to_str()
-                .ok_or("SAH client path is not UTF-8")?
-                .to_owned(),
+        (
+            Some(
+                launch::sah_binary()?
+                    .to_str()
+                    .ok_or("SAH client path is not UTF-8")?
+                    .to_owned(),
+            ),
+            sah_args,
         )
     };
-    let id = state.0.spawn_with_args(
-        SpawnOpts { rows, cols, cwd, program },
+    let mut extra_env = Vec::new();
+    if program.is_none() {
+        let prefs = prefs::load(&app).unwrap_or_default();
+        if prefs.blocks_enabled && prefs.blocks_shell_integration {
+            let config = app
+                .path()
+                .app_config_dir()
+                .map_err(|_| shell_integration::PREPARE_FAILED.to_string())?;
+            if let Some(prepared) = shell_integration::prepare(&config)? {
+                if let Some(bin) = prepared.program {
+                    program = Some(bin);
+                    args = prepared.args;
+                }
+                extra_env = prepared.env;
+            }
+        }
+    }
+    let id = state.0.spawn_prepared(
+        SpawnOpts {
+            rows,
+            cols,
+            cwd,
+            program,
+        },
         &args,
+        &extra_env,
     )?;
     Ok(id.0)
 }
@@ -205,7 +247,7 @@ fn pty_signal(state: State<PtyHandle>, id: u64, signal: String) -> Result<String
 }
 
 /// Folders AfterTerm owns (config, data, logs, cache); user saves and logs are never written inside them.
-fn protected_dirs(app: &AppHandle) -> Vec<PathBuf> {
+pub(crate) fn protected_dirs(app: &AppHandle) -> Vec<PathBuf> {
     let path = app.path();
     [
         path.app_config_dir(),
@@ -214,14 +256,14 @@ fn protected_dirs(app: &AppHandle) -> Vec<PathBuf> {
         path.app_log_dir(),
         path.app_cache_dir(),
     ]
-        .into_iter()
-        .filter_map(Result::ok)
-        .collect()
+    .into_iter()
+    .filter_map(Result::ok)
+    .collect()
 }
 
 /// Run the native save dialog in Rust. The webview only suggests a file name;
 /// it never supplies the path that is written.
-async fn choose_save_path(
+pub(crate) async fn choose_save_path(
     app: &AppHandle,
     window: &tauri::Window,
     suggested: &str,
@@ -245,6 +287,25 @@ async fn choose_save_path(
     }
 }
 
+/// Native open dialog. The webview never supplies the path that is read.
+pub(crate) async fn choose_open_path(
+    app: &AppHandle,
+    window: &tauri::Window,
+) -> Result<Option<PathBuf>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let dialog = app.dialog().file().set_parent(window);
+    let picked = tauri::async_runtime::spawn_blocking(move || dialog.blocking_pick_file())
+        .await
+        .map_err(|_| "The file is not available".to_string())?;
+    match picked {
+        None => Ok(None),
+        Some(path) => path
+            .into_path()
+            .map(Some)
+            .map_err(|_| "The file is not available".to_string()),
+    }
+}
+
 #[tauri::command]
 async fn save_text_file(
     app: AppHandle,
@@ -261,7 +322,8 @@ async fn save_text_file(
         "html" => ("HTML document", "html"),
         _ => return Err(format!("Unknown save kind: {kind}")),
     };
-    let Some(path) = choose_save_path(&app, &window, &suggested_name, label, extension).await? else {
+    let Some(path) = choose_save_path(&app, &window, &suggested_name, label, extension).await?
+    else {
         return Ok(None);
     };
     let mut file = files::open_for_write(&path, &protected_dirs(&app), false)?;
@@ -279,7 +341,8 @@ async fn pty_log_start(
     id: u64,
     suggested_name: String,
 ) -> Result<Option<String>, String> {
-    let Some(path) = choose_save_path(&app, &window, &suggested_name, "Session log", "log").await? else {
+    let Some(path) = choose_save_path(&app, &window, &suggested_name, "Session log", "log").await?
+    else {
         return Ok(None);
     };
     let file = files::open_for_write(&path, &protected_dirs(&app), true)?;
@@ -308,21 +371,53 @@ fn prefs_save(app: AppHandle, prefs: prefs::Prefs) -> Result<(), String> {
     prefs::save(&app, &prefs)
 }
 
-fn apply_window_effects(app: &tauri::App) -> Result<(), String> {
+fn hud_window(window: &tauri::WebviewWindow) {
     #[cfg(target_os = "macos")]
     {
         use tauri::window::{Effect, EffectState, EffectsBuilder};
-        if let Some(window) = app.get_webview_window("main") {
-            let _ = window.set_effects(
-                EffectsBuilder::new()
-                    .effect(Effect::HudWindow)
-                    .state(EffectState::Active)
-                    .radius(10.0)
-                    .build(),
-            );
-        }
+        let _ = window.set_effects(
+            EffectsBuilder::new()
+                .effect(Effect::HudWindow)
+                .state(EffectState::Active)
+                .radius(10.0)
+                .build(),
+        );
     }
-    let _ = app;
+    let _ = window;
+}
+
+fn apply_window_effects(app: &tauri::App) -> Result<(), String> {
+    if let Some(window) = app.get_webview_window("main") {
+        hud_window(&window);
+    }
+    Ok(())
+}
+
+/// Extra windows use labels `win1`, `win2`, … so they match the `win*` capability.
+static NEXT_WINDOW: AtomicU64 = AtomicU64::new(1);
+
+/// Opens another AfterTerm window from the configured main window. The webview
+/// does not choose the URL: dev and production both come from that window config.
+#[tauri::command]
+async fn open_window(app: AppHandle) -> Result<(), String> {
+    let label = format!("win{}", NEXT_WINDOW.fetch_add(1, Ordering::Relaxed));
+    let Some(mut config) = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|window| window.label == "main")
+        .cloned()
+    else {
+        return Err("Could not open a window".into());
+    };
+    config.label = label;
+    let window = tauri::WebviewWindowBuilder::from_config(&app, &config)
+        .map_err(|_| "Could not open a window".to_string())?
+        .build()
+        .map_err(|_| "Could not open a window".to_string())?;
+    hud_window(&window);
+    let _ = window.set_focus();
     Ok(())
 }
 
@@ -335,7 +430,9 @@ fn apply_window_effects(app: &tauri::App) -> Result<(), String> {
 const OTHER_ACCELERATORS: &[(&str, &str)] = &[
     ("CmdOrCtrl+,", "Ctrl+,"),
     ("CmdOrCtrl+T", "Ctrl+Shift+T"),
+    ("CmdOrCtrl+N", "Ctrl+Shift+N"),
     ("CmdOrCtrl+W", "Ctrl+Shift+W"),
+    ("CmdOrCtrl+Shift+W", "Ctrl+Shift+Alt+W"),
     ("CmdOrCtrl+S", "Ctrl+Shift+S"),
     ("CmdOrCtrl+Shift+S", "Ctrl+Shift+Alt+S"),
     ("CmdOrCtrl+Alt+S", "Ctrl+Shift+Alt+H"),
@@ -347,20 +444,35 @@ const OTHER_ACCELERATORS: &[(&str, &str)] = &[
     ("CmdOrCtrl+A", "Ctrl+Shift+A"),
     ("CmdOrCtrl+Shift+A", "Ctrl+Shift+Alt+A"),
     ("CmdOrCtrl+F", "Ctrl+Shift+F"),
+    ("CmdOrCtrl+G", "Ctrl+Shift+Alt+G"),
+    ("CmdOrCtrl+Alt+G", "Shift+F3"),
     ("CmdOrCtrl+Shift+E", "Ctrl+Shift+E"),
     ("CmdOrCtrl+K", "Ctrl+Shift+K"),
     ("CmdOrCtrl+Alt+R", "Ctrl+Shift+Alt+R"),
     ("Ctrl+Shift+C", "Ctrl+Shift+Alt+C"),
     ("CmdOrCtrl+Shift+R", "Ctrl+Shift+R"),
+    ("CmdOrCtrl+Shift+Y", "Ctrl+Shift+Y"),
     ("CmdOrCtrl+Shift+H", "Ctrl+Shift+H"),
     ("CmdOrCtrl+Shift+O", "Ctrl+Shift+O"),
     ("CmdOrCtrl+Shift+K", "Ctrl+Shift+Alt+K"),
     ("CmdOrCtrl+I", "Ctrl+Shift+I"),
+    ("CmdOrCtrl+L", "Ctrl+Shift+Alt+L"),
+    ("Ctrl+CmdOrCtrl+F", "F11"),
     ("CmdOrCtrl+=", "Ctrl+="),
     ("CmdOrCtrl+-", "Ctrl+-"),
     ("CmdOrCtrl+0", "Ctrl+0"),
     ("CmdOrCtrl+Shift+]", "Ctrl+Shift+]"),
     ("CmdOrCtrl+Shift+[", "Ctrl+Shift+["),
+    ("CmdOrCtrl+Shift+B", "Ctrl+Shift+B"),
+    ("CmdOrCtrl+Shift+J", "Ctrl+Shift+J"),
+    ("CmdOrCtrl+Shift+Up", "Ctrl+Shift+Up"),
+    ("CmdOrCtrl+Shift+Down", "Ctrl+Shift+Down"),
+    ("CmdOrCtrl+Shift+Alt+B", "Ctrl+Shift+Alt+B"),
+    ("CmdOrCtrl+Shift+G", "Ctrl+Shift+G"),
+    ("CmdOrCtrl+Shift+D", "Ctrl+Shift+D"),
+    ("CmdOrCtrl+Alt+Right", "Ctrl+Shift+Alt+Right"),
+    ("CmdOrCtrl+Alt+Down", "Ctrl+Shift+Alt+Down"),
+    ("CmdOrCtrl+Alt+Left", "Ctrl+Shift+Alt+Left"),
 ];
 
 /// The accelerator to register on this platform. Off macOS an accelerator missing from
@@ -428,14 +540,47 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         true,
         &[
             &item(handle, "file.new-tab", "New Tab", Some("CmdOrCtrl+T"))?,
+            &item(handle, "file.new-window", "New Window", Some("CmdOrCtrl+N"))?,
+            &sep()?,
             &item(handle, "file.close-tab", "Close Tab", Some("CmdOrCtrl+W"))?,
+            &item(
+                handle,
+                "file.close-window",
+                "Close Window",
+                Some("CmdOrCtrl+Shift+W"),
+            )?,
             &sep()?,
-            &item(handle, "file.save-transcript", "Save Transcript…", Some("CmdOrCtrl+S"))?,
-            &item(handle, "file.save-selection", "Save Selection…", Some("CmdOrCtrl+Shift+S"))?,
-            &item(handle, "file.export-html", "Export Transcript as HTML…", Some("CmdOrCtrl+Alt+S"))?,
-            &item(handle, "file.log-session", "Log Session to File… (toggle)", Some("CmdOrCtrl+Shift+L"))?,
+            &item(
+                handle,
+                "file.save-transcript",
+                "Save Transcript…",
+                Some("CmdOrCtrl+S"),
+            )?,
+            &item(
+                handle,
+                "file.save-selection",
+                "Save Selection…",
+                Some("CmdOrCtrl+Shift+S"),
+            )?,
+            &item(
+                handle,
+                "file.export-html",
+                "Export Transcript as HTML…",
+                Some("CmdOrCtrl+Alt+S"),
+            )?,
+            &item(
+                handle,
+                "file.log-session",
+                "Log Session to File… (toggle)",
+                Some("CmdOrCtrl+Shift+L"),
+            )?,
             &sep()?,
-            &item(handle, "file.print", "Print Transcript…", Some("CmdOrCtrl+P"))?,
+            &item(
+                handle,
+                "file.print",
+                "Print Transcript…",
+                Some("CmdOrCtrl+P"),
+            )?,
         ],
     )?;
     let edit = Submenu::with_id_and_items(
@@ -448,10 +593,118 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             &item(handle, "edit.copy", "Copy", Some("CmdOrCtrl+C"))?,
             &item(handle, "edit.paste", "Paste", Some("CmdOrCtrl+V"))?,
             &item(handle, "edit.select-all", "Select All", Some("CmdOrCtrl+A"))?,
-            &item(handle, "edit.clear-selection", "Clear Selection", Some("CmdOrCtrl+Shift+A"))?,
+            &item(
+                handle,
+                "edit.clear-selection",
+                "Clear Selection",
+                Some("CmdOrCtrl+Shift+A"),
+            )?,
             &sep()?,
             &item(handle, "edit.find", "Find…", Some("CmdOrCtrl+F"))?,
-            &item(handle, "edit.explain", "Explain Selection", Some("CmdOrCtrl+Shift+E"))?,
+            &item(handle, "edit.find-next", "Find Next", Some("CmdOrCtrl+G"))?,
+            &item(
+                handle,
+                "edit.find-prev",
+                "Find Previous",
+                Some("CmdOrCtrl+Alt+G"),
+            )?,
+        ],
+    )?;
+    let ai = Submenu::with_id_and_items(
+        handle,
+        "ai",
+        "AI",
+        true,
+        &[
+            &item(
+                handle,
+                "ai.explain",
+                "Explain Selection",
+                Some("CmdOrCtrl+Shift+E"),
+            )?,
+            &item(handle, "ai.explain-block", "Explain Block", None)?,
+            &sep()?,
+            &item(handle, "ai.settings", "AI Settings…", None)?,
+        ],
+    )?;
+    let blocks = Submenu::with_id_and_items(
+        handle,
+        "blocks",
+        "Blocks",
+        true,
+        &[
+            &item(
+                handle,
+                "blocks.toggle",
+                "Enable Blocks",
+                Some("CmdOrCtrl+Shift+B"),
+            )?,
+            &item(
+                handle,
+                "blocks.open",
+                "Blocks Panel…",
+                Some("CmdOrCtrl+Shift+J"),
+            )?,
+            &sep()?,
+            &item(
+                handle,
+                "blocks.prev",
+                "Previous Block",
+                Some("CmdOrCtrl+Shift+Up"),
+            )?,
+            &item(
+                handle,
+                "blocks.next",
+                "Next Block",
+                Some("CmdOrCtrl+Shift+Down"),
+            )?,
+            &sep()?,
+            &item(
+                handle,
+                "blocks.copy",
+                "Copy Block",
+                Some("CmdOrCtrl+Shift+Alt+B"),
+            )?,
+            &item(handle, "blocks.copy-command", "Copy Command", None)?,
+            &item(handle, "blocks.copy-output", "Copy Output", None)?,
+            &item(
+                handle,
+                "blocks.explain",
+                "Explain Block",
+                Some("CmdOrCtrl+Shift+G"),
+            )?,
+            &sep()?,
+            &item(
+                handle,
+                "blocks.snippet",
+                "Copy Shell Integration Snippet",
+                None,
+            )?,
+            &sep()?,
+            &item(handle, "blocks.show-exit", "Show Exit Codes", None)?,
+            &item(handle, "blocks.show-duration", "Show Durations", None)?,
+            &item(handle, "blocks.show-timestamps", "Show Timestamps", None)?,
+            &item(handle, "blocks.gutter", "Show Block Gutter", None)?,
+            &item(
+                handle,
+                "blocks.shell-integration",
+                "Shell Integration for New Local Tabs",
+                None,
+            )?,
+        ],
+    )?;
+    let drive = Submenu::with_id_and_items(
+        handle,
+        "drive",
+        "Drive",
+        true,
+        &[
+            &item(
+                handle,
+                "drive.open",
+                "Drive Panel…",
+                Some("CmdOrCtrl+Shift+D"),
+            )?,
         ],
     )?;
     let signals = Submenu::with_id_and_items(
@@ -473,18 +726,64 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         "Shell",
         true,
         &[
-            &item(handle, "shell.clear", "Clear Scrollback", Some("CmdOrCtrl+K"))?,
-            &item(handle, "shell.reset", "Reset Terminal (sends stty sane)", Some("CmdOrCtrl+Alt+R"))?,
-            &item(handle, "shell.stty-show", "Show Terminal Settings (sends stty -a)", None)?,
+            &item(
+                handle,
+                "shell.clear",
+                "Clear Scrollback",
+                Some("CmdOrCtrl+K"),
+            )?,
+            &item(
+                handle,
+                "shell.reset",
+                "Reset Terminal (sends stty sane)",
+                Some("CmdOrCtrl+Alt+R"),
+            )?,
+            &item(
+                handle,
+                "shell.stty-show",
+                "Show Terminal Settings (sends stty -a)",
+                None,
+            )?,
             &sep()?,
-            &item(handle, "shell.interrupt", "Send Control-C", Some("Ctrl+Shift+C"))?,
+            &item(
+                handle,
+                "shell.interrupt",
+                "Send Control-C",
+                Some("Ctrl+Shift+C"),
+            )?,
             &signals,
             &sep()?,
-            &item(handle, "shell.toggle-review", "Toggle Submission Review", Some("CmdOrCtrl+Shift+R"))?,
+            &item(
+                handle,
+                "shell.toggle-review",
+                "Toggle Submission Review",
+                Some("CmdOrCtrl+Shift+R"),
+            )?,
             &sep()?,
-            &item(handle, "shell.connect-sah", "Connect SAH…", Some("CmdOrCtrl+Shift+H"))?,
-            &item(handle, "shell.connect-console", "Connect Serial Console…", Some("CmdOrCtrl+Shift+O"))?,
-            &item(handle, "shell.ssh-compat", "SSH Compatibility…", Some("CmdOrCtrl+Shift+K"))?,
+            &item(
+                handle,
+                "shell.connect-ssh",
+                "Connect SSH…",
+                Some("CmdOrCtrl+Shift+Y"),
+            )?,
+            &item(
+                handle,
+                "shell.connect-sah",
+                "Connect SAH…",
+                Some("CmdOrCtrl+Shift+H"),
+            )?,
+            &item(
+                handle,
+                "shell.connect-console",
+                "Connect Serial Console…",
+                Some("CmdOrCtrl+Shift+O"),
+            )?,
+            &item(
+                handle,
+                "shell.ssh-compat",
+                "SSH Compatibility…",
+                Some("CmdOrCtrl+Shift+K"),
+            )?,
         ],
     )?;
     let view = Submenu::with_id_and_items(
@@ -493,13 +792,39 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         "View",
         true,
         &[
-            &item(handle, "view.session-info", "Session Info…", Some("CmdOrCtrl+I"))?,
+            &item(
+                handle,
+                "view.session-info",
+                "Session Info…",
+                Some("CmdOrCtrl+I"),
+            )?,
             &sep()?,
-            &item(handle, "view.font-larger", "Bigger Text", Some("CmdOrCtrl+="))?,
-            &item(handle, "view.font-smaller", "Smaller Text", Some("CmdOrCtrl+-"))?,
-            &item(handle, "view.font-reset", "Default Text Size", Some("CmdOrCtrl+0"))?,
+            &item(handle, "view.font-larger", "Zoom In", Some("CmdOrCtrl+="))?,
+            &item(handle, "view.font-smaller", "Zoom Out", Some("CmdOrCtrl+-"))?,
+            &item(
+                handle,
+                "view.font-reset",
+                "Actual Size",
+                Some("CmdOrCtrl+0"),
+            )?,
             &sep()?,
-            &item(handle, "view.prefs", "Preferences and Themes…", None)?,
+            &item(
+                handle,
+                "view.fullscreen",
+                "Full Screen",
+                Some("Ctrl+CmdOrCtrl+F"),
+            )?,
+            &item(
+                handle,
+                "view.focus-terminal",
+                "Focus Terminal",
+                Some("CmdOrCtrl+L"),
+            )?,
+            &sep()?,
+            &item(handle, "view.copy-on-select", "Copy on Select", None)?,
+            &item(handle, "view.reduce-motion", "Reduce Motion", None)?,
+            &sep()?,
+            &item(handle, "view.prefs", "Themes…", None)?,
         ],
     )?;
     let window = Submenu::with_id_and_items(
@@ -511,11 +836,43 @@ fn install_menu(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
             &PredefinedMenuItem::minimize(handle, None)?,
             &PredefinedMenuItem::maximize(handle, None)?,
             &sep()?,
-            &item(handle, "window.next-tab", "Next Tab", Some("CmdOrCtrl+Shift+]"))?,
-            &item(handle, "window.prev-tab", "Previous Tab", Some("CmdOrCtrl+Shift+["))?,
+            &item(
+                handle,
+                "window.next-tab",
+                "Next Tab",
+                Some("CmdOrCtrl+Shift+]"),
+            )?,
+            &item(
+                handle,
+                "window.prev-tab",
+                "Previous Tab",
+                Some("CmdOrCtrl+Shift+["),
+            )?,
+            &sep()?,
+            &item(
+                handle,
+                "window.split-right",
+                "Split Right",
+                Some("CmdOrCtrl+Alt+Right"),
+            )?,
+            &item(
+                handle,
+                "window.split-down",
+                "Split Down",
+                Some("CmdOrCtrl+Alt+Down"),
+            )?,
+            &item(
+                handle,
+                "window.focus-other",
+                "Focus Other Pane",
+                Some("CmdOrCtrl+Alt+Left"),
+            )?,
         ],
     )?;
-    let menu = Menu::with_items(handle, &[&app_menu, &file, &edit, &shell, &view, &window])?;
+    let menu = Menu::with_items(
+        handle,
+        &[&app_menu, &file, &edit, &ai, &blocks, &drive, &shell, &view, &window],
+    )?;
     app.set_menu(menu)?;
     Ok(())
 }
@@ -538,8 +895,12 @@ pub fn launch_cli() -> Result<(), String> {
         #[cfg(not(unix))]
         return Err("Console mode requires macOS or Linux".into());
     }
-    let args = args.into_iter()
-        .map(|s| s.into_string().map_err(|_| "GUI arguments must be UTF-8".to_string()))
+    let args = args
+        .into_iter()
+        .map(|s| {
+            s.into_string()
+                .map_err(|_| "GUI arguments must be UTF-8".to_string())
+        })
         .collect::<Result<Vec<_>, _>>()?;
     run_gui(args);
     Ok(())
@@ -591,10 +952,31 @@ fn run_gui(args: Vec<String>) {
             save_text_file,
             print_page,
             prefs_load,
-            prefs_save
+            prefs_save,
+            workspace_load,
+            workspace_save,
+            local_hostnames,
+            open_window,
+            drive_list_buckets,
+            drive_list_objects,
+            drive_preview,
+            drive_put_text,
+            drive_put_file,
+            drive_download,
+            drive_delete
         ])
         .on_menu_event(|app, event| {
-            let _ = app.emit("afterterm:menu", event.id().0.to_string());
+            // One menu is shared by every window. Deliver the choice only to the
+            // focused window, or New Tab in one window would also run in the others.
+            // Tauri's get_focused_window is unstable, so this checks each window.
+            let Some(window) = app
+                .webview_windows()
+                .into_values()
+                .find(|window| window.is_focused().unwrap_or(false))
+            else {
+                return;
+            };
+            let _ = window.emit("afterterm:menu", event.id().0.to_string());
         })
         .build(tauri::generate_context!())
         .expect("error while building AfterTerm")
@@ -651,6 +1033,17 @@ mod registration_tests {
             "print_page",
             "prefs_load",
             "prefs_save",
+            "workspace_load",
+            "workspace_save",
+            "local_hostnames",
+            "open_window",
+            "drive_list_buckets",
+            "drive_list_objects",
+            "drive_preview",
+            "drive_put_text",
+            "drive_put_file",
+            "drive_download",
+            "drive_delete",
         ] {
             assert!(handler.contains(name), "{name} is not registered");
         }
@@ -677,17 +1070,38 @@ mod accelerator_tests {
 
     #[test]
     fn macos_keeps_the_written_accelerator() {
-        assert_eq!(platform_accelerator("CmdOrCtrl+C", true), Some("CmdOrCtrl+C"));
-        assert_eq!(platform_accelerator("Ctrl+Shift+C", true), Some("Ctrl+Shift+C"));
+        assert_eq!(
+            platform_accelerator("CmdOrCtrl+C", true),
+            Some("CmdOrCtrl+C")
+        );
+        assert_eq!(
+            platform_accelerator("Ctrl+Shift+C", true),
+            Some("Ctrl+Shift+C")
+        );
     }
 
     #[test]
     fn other_platforms_move_letters_to_control_shift() {
-        assert_eq!(platform_accelerator("CmdOrCtrl+C", false), Some("Ctrl+Shift+C"));
-        assert_eq!(platform_accelerator("CmdOrCtrl+A", false), Some("Ctrl+Shift+A"));
-        assert_eq!(platform_accelerator("CmdOrCtrl+P", false), Some("Ctrl+Shift+P"));
-        assert_eq!(platform_accelerator("CmdOrCtrl+Shift+S", false), Some("Ctrl+Shift+Alt+S"));
-        assert_eq!(platform_accelerator("Ctrl+Shift+C", false), Some("Ctrl+Shift+Alt+C"));
+        assert_eq!(
+            platform_accelerator("CmdOrCtrl+C", false),
+            Some("Ctrl+Shift+C")
+        );
+        assert_eq!(
+            platform_accelerator("CmdOrCtrl+A", false),
+            Some("Ctrl+Shift+A")
+        );
+        assert_eq!(
+            platform_accelerator("CmdOrCtrl+P", false),
+            Some("Ctrl+Shift+P")
+        );
+        assert_eq!(
+            platform_accelerator("CmdOrCtrl+Shift+S", false),
+            Some("Ctrl+Shift+Alt+S")
+        );
+        assert_eq!(
+            platform_accelerator("Ctrl+Shift+C", false),
+            Some("Ctrl+Shift+Alt+C")
+        );
         assert_eq!(platform_accelerator("CmdOrCtrl+=", false), Some("Ctrl+="));
         assert_eq!(platform_accelerator("CmdOrCtrl+Q", false), None);
     }
@@ -713,9 +1127,15 @@ mod accelerator_tests {
             assert!(others.insert(*other), "{other} used twice");
             let parts: Vec<&str> = other.split('+').collect();
             let key = parts.last().expect("key");
-            assert!(!parts.contains(&"CmdOrCtrl"), "{other} must name Ctrl explicitly");
+            assert!(
+                !parts.contains(&"CmdOrCtrl"),
+                "{other} must name Ctrl explicitly"
+            );
             if key.len() == 1 && key.chars().all(|c| c.is_ascii_alphabetic()) {
-                assert!(parts.contains(&"Shift"), "{other} would take Control+{key} from the shell");
+                assert!(
+                    parts.contains(&"Shift"),
+                    "{other} would take Control+{key} from the shell"
+                );
             }
         }
     }

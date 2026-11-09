@@ -1,5 +1,6 @@
 import type { KeyboardEvent } from "react";
 import type { ConsoleConfig } from "./console.ts";
+import type { TabOrigin } from "./sessions.ts";
 export type Tab = {
   reviewed?: boolean;
   consoleConfig?: ConsoleConfig;
@@ -8,6 +9,10 @@ export type Tab = {
   sessionId: number | null;
   title: string;
   status: "starting" | "running" | "exited" | "error";
+  attention?: boolean;
+  origin?: TabOrigin | null;
+  reportedCwd?: string | null;
+  spawnCwd?: string | null;
 };
 
 /** Element ids that tie each tab to its terminal panel (aria-controls / aria-labelledby). */
@@ -62,8 +67,10 @@ export function TabBar({ tabs, activeKey, onSelect, onClose, onNew }: Props) {
         {tabs.map((tab, index) => {
           const selected = tab.key === activeKey;
           const state = STATUS_TEXT[tab.status];
+          const attention = tab.attention ? "needs attention" : "";
+          const detail = state && attention ? `, ${state}, ${attention}` : state ? `, ${state}` : attention ? `, ${attention}` : "";
           return (
-            <div key={tab.key} role="presentation" className={`tab ${selected ? "is-active" : ""} ${tab.status === "exited" ? "is-exited" : ""}`}>
+            <div key={tab.key} role="presentation" className={`tab ${selected ? "is-active" : ""} ${tab.status === "exited" || tab.status === "error" ? "is-exited" : ""} ${tab.attention ? "has-attention" : ""}`}>
               <button
                 id={tabId(tab.key)}
                 role="tab"
@@ -77,7 +84,7 @@ export function TabBar({ tabs, activeKey, onSelect, onClose, onNew }: Props) {
                 title={tab.title}
               >
                 <span className="tab-title">{tab.title}</span>
-                {state && <span className="visually-hidden">, {state}</span>}
+                {(state || tab.attention) && <span className="visually-hidden">{detail}</span>}
               </button>
               <button
                 className="tab-close"
